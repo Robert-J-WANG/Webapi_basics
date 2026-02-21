@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+    </PropertyGroup>
+
+    <ItemGroup>
+<!--        移出OpenApi包的引用-->
+        <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.12"/>
+        <PackageReference Include="Scalar.AspNetCore" Version="2.12.46" />
+<!--        <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.4" />-->
+    </ItemGroup>
+
+</Project>
