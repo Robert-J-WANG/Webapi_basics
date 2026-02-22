@@ -297,7 +297,7 @@ http://localhost:5085/scalar/
 
 ### 2. 路由与 Action：把“方法调用”变成“HTTP 调用”
 
-#### 1. 有什么问题？
+#### 1. 解决什么问题？
 
 在 Console 项目里，调用订单查询是这样：
 
@@ -461,4 +461,182 @@ Console 可以返回 `null`；Web API 需要表达 **HTTP 语义**（200 / 404�
 2. 还不能创建订单（`POST /orders`），也就是说客户端的 JSON 请求体还没法进入 C# 对象
 
 
+
+### 3. DTO 与模型绑定：从 JSON Body 变成 C# 对象
+
+#### 1. 解决什么问题？
+
+上一章我们已经能通过 URL 查询订单：
+
+- `GET /orders`
+- `GET /orders/{id}`
+
+但订单接口还缺一个最基本能力：**创建订单**。
+
+客户端创建订单时，通常会发送 JSON，例如：
+
+```c#
+{
+  "amount": 99.9
+}
+```
+
+问题来了：
+
+1. 这个 JSON 谁来接？
+2. 它怎么变成 C# 对象？
+3. 返回给客户端的数据，能不能和内部数据结构分开？
+
+这就是这一章要解决的核心：**输入（请求）与输出（响应）的结构设计**。
+
+#### 2. 引入 DTO
+
+当客户端发请求、接口返回结果时，和程序内部使用的对象，并不一定是同一种结构。
+
+所以我们需要两类对象：
+
+- **输入 DTO（Request DTO）**：表示客户端传进来的数据
+- **输出 DTO（Response DTO）**：表示接口返回给客户端的数据
+
+这样做的意义是：
+
+- 接口结构更清晰（对外契约明确）
+- 内部结构更容易调整（不直接暴露内部对象）
+- 后面加验证、状态码、业务规则时会更稳定
+
+#### 3. 为订单创建“输入 DTO”和“输出 DTO”
+
+- 创建输入 DTO（客户端发来的 JSON）
+
+    新建文件：`Dtos/Requests/OrderCreateRequest.cs`
+
+    ```c#
+    public class OrderCreateRequest
+    {
+        public decimal Amount { get; set; }
+    }
+    ```
+
+    这个类表示客户端要创建订单时提交的数据： 当客户端发送 JSON body 时，框架会把它绑定成这个对象
+
+- 创建输出 DTO（接口返回的数据）
+
+    新建文件：`Dtos/Responses/OrderResponse.cs`
+
+    ```c#
+    public class OrderResponse
+    {
+        public int Id { get; set; }
+        public decimal Amount { get; set; }
+        public string Status { get; set; } = string.Empty;
+    }
+    ```
+
+    这个类表示接口返回给客户端的订单结构。
+
+- 模型绑定是怎么发生的？
+
+    当 Action 参数里出现一个复杂类型（如 `OrderCreateRequest`）时，ASP.NET Core 会尝试从请求体（Body）读取 JSON，并自动绑定到这个对象。
+
+    也就是说，客户端发送：
+
+    ```c#
+    {
+      "amount": 99.9
+    }
+    ```
+
+    Action 可以直接收到：
+
+    ```c#
+    request.Amount == 99.9m
+    ```
+
+    这一步就是“从 JSON Body 变成 C# 对象”。
+
+#### 4.  OrdersController 中加入 `POST `
+
+升级一下OrdersController：保留查询接口，并新增创建接口 ``POST /orders``。
+
+```c#
+namespace WebAPI_Basics.Controllers;
+
+[ApiController]
+[Route("[controller]")]
+public class OrdersController:ControllerBase
+{
+	...
+    
+    [HttpPost]
+    public IActionResult Create(OrderCreateRequest  request)
+    {
+        var nextId=Orders.Count==0?1:Orders.Max(x=>x.Id)+1;
+        var order = new OrderItem(nextId,request.Amount,"Created");
+        
+        Orders.Add(order);
+        return Ok(ToResponse(order));
+    }
+
+    //辅助方法： 把OrderItem转换成OrderResponse
+    private OrderResponse ToResponse(OrderItem order)
+    {
+        return new OrderResponse
+        {
+            Id = order.Id,
+            Amount = order.Amount,
+            Status = order.Status,
+        };
+    }
+    
+}
+```
+
+**方法`POST /orders `**
+
+表示：
+
+- 路径：`/orders`
+- 方法：`POST`
+
+客户端发送 JSON body 后，框架会把它绑定成 `request`。
+
+**输入和输出分开**
+
+- 输入用 `OrderCreateRequest`
+- 输出用 `OrderResponse`
+
+Controller 不再直接把内部 `OrderItem` 返回给客户端，而是先转换成 `OrderResponse`。
+
+**运行结果**
+
+发送请求：
+
+```c#
+{
+  "amount": 99.9
+}
+```
+
+返回新订单（当前代码返回 200）
+
+#### 5. 小结
+
+这一章完成了 Web API 的关键一步：
+
+- 能接收客户端的 JSON 请求体
+- 能把 JSON 自动绑定成 C# 对象（模型绑定）
+- 能用 DTO 区分“输入结构”和“输出结构”
+- 能通过 `POST /orders` 创建资源
+
+这意味着现在的api已经不只是“读”，而是开始具备真正的交互能力。
+
+**新的问题来了？？**
+
+现在 `POST /orders` 已经能创建订单，但返回结果还比较粗糙：
+
+- 创建成功返回 `200` 还是 `201` 更合适？
+- 创建后是否应该告诉客户端新资源地址（Location）？
+- `GET /orders/{id}` 不存在时返回 `404`，创建失败时又该返回什么？
+
+这些问题都属于 **HTTP 状态码与返回结果设计**，下一章就会系统解决。
 

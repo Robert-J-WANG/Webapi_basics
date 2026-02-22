@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using WebAPI_Basics.Dtos.Requests;
 
 namespace WebAPI_Basics.Controllers;
 
@@ -13,6 +14,7 @@ public class OrdersController:ControllerBase
         new(1, 100m, "Created"),
         new(2, 200m, "Paid")
     ];
+    
     [HttpGet]
     public IActionResult GetAll()
     {
@@ -29,4 +31,26 @@ public class OrdersController:ControllerBase
         }
         return Ok(order);
     }
+    
+    [HttpPost]
+    public IActionResult Create(OrderCreateRequest  request)
+    {
+        var nextId=Orders.Count==0?1:Orders.Max(x=>x.Id)+1;
+        var order = new OrderItem(nextId,request.Amount,"Created");
+        
+        Orders.Add(order);
+        return Ok(ToResponse(order));
+    }
+
+    //辅助方法： 把OrderItem转换成OrderResponse
+    private OrderResponse ToResponse(OrderItem order)
+    {
+        return new OrderResponse
+        {
+            Id = order.Id,
+            Amount = order.Amount,
+            Status = order.Status,
+        };
+    }
+    
 }
