@@ -7,7 +7,92 @@
 - 选择使用controller
 - 选择使用open api
 
-#### 2. 运行项目
+#### 2. 主程序结构
+
+项目入口文件是program.cs
+
+```c#
+using Microsoft.AspNetCore.Mvc;
+
+// 实例化 WebApplicationBuilder
+var builder = WebApplication.CreateBuilder(args);
+
+// =======================
+// 1) Services: 注册所有依赖（DI 容器）
+// =======================
+
+// 1.1 MVC / Controller 能力（Controller Web API 必备）
+builder.Services.AddControllers();
+
+// 1.2 API 文档（开发环境常用）
+builder.Services.AddOpenApi();
+
+// 1.3 自定的依赖（Service / Repository / DbContext / HttpClient ...）
+// builder.Services.AddScoped<OrderService>();
+// builder.Services.AddSingleton<IOrderRepository, InMemoryOrderRepository>();
+
+// 1.4 常见可扩展项（先留位置，后面你要用再打开）
+// builder.Services.AddDbContext<AppDbContext>(...);
+// builder.Services.AddAuthentication(...);
+// builder.Services.AddAuthorization(...);
+// builder.Services.AddCors(...);
+
+// 构建 WebApplication 实例
+var app = builder.Build();
+
+// =======================
+// 2) Middleware: 配置请求处理管道（UseXXX 顺序很重要）
+// =======================
+
+// 2.1 开发环境工具（只在开发环境）
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+}
+
+// 2.2 全局异常处理（真实项目非常推荐放最前面）
+// app.UseExceptionHandler("/error");   // 或自定义异常中间件
+
+// 2.3 安全相关（常见）
+app.UseHttpsRedirection(); //http 重定向为 https
+
+// 2.4 跨域（如果你有前端要访问 API，通常放在 Routing 之后、Auth 之前）
+// app.UseCors("Default");
+
+// 2.5 认证/授权（如果你做登录权限）
+// app.UseAuthentication();
+app.UseAuthorization();
+
+// =======================
+// 3) Endpoints: 映射端点（Controller 路由挂载）
+// =======================
+app.MapControllers();
+
+// 运行app
+app.Run();
+```
+
+总结：
+
+- **Builder 阶段（准备/注册）**
+
+    `CreateBuilder` + `Services.Add...`
+
+    注册依赖、加载配置、准备日志
+
+- **App 阶段（组装管道）**
+
+    `Build` + `Use...` + `Map...`
+
+    中间件有顺序顺序、路由端点映射
+
+- **Run 阶段（启动监听）**
+
+     `Run()`
+
+    应用开始接 HTTP 请求
+
+#### 3. 运行项目
 
 访问地址测试是否连接成功
 
@@ -50,7 +135,7 @@ http://localhost:5085/weatherforecast/
 ]
 ```
 
-#### 3. 使用swagger
+#### 4. 使用swagger
 
 在 .NET 9 之后，微软默认**移除了内置的 Swashbuckle (Swagger)** 支持，转而推行官方的 **`Microsoft.AspNetCore.OpenApi`** 库。
 
@@ -81,19 +166,15 @@ if (app.Environment.IsDevelopment())
 
 **注意：要删除open api的依赖和使用，否则会和swagger冗余重读报错** 
 
-完整代码：
+代码如下：
 
 ```c#
-namespace WebAPI_Basics;
-
 public class Program
 {
     public static void Main(string[] args)
     {
-        var builder = WebApplication.CreateBuilder(args);
-       
-        builder.Services.AddControllers();
-        // builder.Services.AddOpenApi(); // 移除 OpenApi()
+        ...
+        // builder.Services.AddOpenApi(); // 移除 OpenApi
         builder.Services.AddEndpointsApiExplorer();
         builder.Services.AddSwaggerGen();
 
@@ -101,17 +182,11 @@ public class Program
 
         if (app.Environment.IsDevelopment())
         {
-            // 移除 OpenApi()
-            // app.MapOpenApi(); 
-            // 使用 UseSwagger();
+            // app.MapOpenApi();  // 移除OpenApi
             app.UseSwagger();
             app.UseSwaggerUI();
         }
-        app.UseHttpsRedirection();
-        app.UseAuthorization();
-        app.MapControllers();
-
-        app.Run();
+        ...
     }
 }
 ```
@@ -141,7 +216,7 @@ public class Program
 http://localhost:5085/swagger/
 ```
 
-#### 4. 使用Scalar 
+#### 5. 使用Scalar 
 
 Scalar 比 swagger更现代， 界面更漂亮、支持多种编程语言的客户端代码生成，且与 .NET 9 官方库集成极简。
 
@@ -217,4 +292,3 @@ public class Program
 ```http
 http://localhost:5085/scalar/
 ```
-
