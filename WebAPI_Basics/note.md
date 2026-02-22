@@ -852,3 +852,153 @@ public class OrdersController : ControllerBase
 如果以后字段变多（比如 `CustomerName`、`OrderType`、`Email`），每个接口都手写 `if` 会很快变乱。
 
 因此，需要“参数是否合法”的基础校验的合理处理。
+
+### 5. 输入验证：框架自动处理基础校验
+
+#### 1. 解决什么问题？
+
+用 DataAnnotations + `[ApiController]` 让框架自动处理基础校验。
+
+第4章里我们已经让 `POST /orders` 能返回更合理的状态码了，但还有一个明显问题：
+
+创建订单时，金额是否合法，是在 Action 里手写判断：
+
+```c#
+if (request.Amount <= 0)
+{
+    return BadRequest(new { message = "Amount must be greater than 0." });
+}
+```
+
+这在字段很少时还能接受，但如果后面请求字段变多（比如名称、邮箱、类型等），Controller 里会出现很多重复校验代码，接口会越来越乱。 
+
+因此，需要解决的是：**把这类“输入是否合法”的基础校验交给框架处理，让 Controller 只关注接口动作本身。**
+
+#### 2. 什么是输入验证？为什么放在 DTO 上？
+
+创建订单时，客户端发来的 JSON 是“输入数据”。
+
+这类数据先进入 `OrderCreateRequest`，所以最合适的校验位置就是 **输入 DTO**。
+
+也就是说：
+
+- “这个字段必填吗？”
+- “这个数字范围是否合法？”
+
+这些规则先写在 DTO 上，让框架在进入 Action 前先检查。
+
+ASP.NET Core 常用做法是使用 **DataAnnotations（数据注解）**，例如：
+
+- `[Required]`
+- `[Range(...)]`
+
+#### 3. `[ApiController]` 的作用
+
+`[ApiController]` 在这里起什么作用？
+
+在controller的最开始，我们已经添加过 
+
+```c#
+[ApiController]
+[Route("[controller]")]
+public class OrdersController : ControllerBase
+{
+    ...
+}       
+```
+
+它不只是一个标记，还会带来一个非常实用的行为：
+
+当模型绑定完成后，如果 DTO 校验失败，框架会**自动返回 400 Bad Request**，并且不会继续执行 Action 方法。
+
+这意味着：
+
+- 不需要在每个 Action 里手写 `if` 检查基础字段合法性
+- Controller 会更干净
+- 错误响应格式也更统一（框架默认格式）
+
+#### 4. 如何操作
+
+只改两处：
+
+1. 给 `OrderCreateRequest` 加验证注解
+
+    ```c#
+    using System.ComponentModel.DataAnnotations;
+    
+    namespace WebAPI.Dtos.Requests;
+    
+    public class OrderCreateRequest
+    {
+        [Range(0.01, (double)decimal.MaxValue, ErrorMessage = "Amount must be greater than 0.")]
+        public decimal Amount { get; set; }
+    }
+    ```
+
+    **这里发生了什么？**
+
+    - `[Range(...)]` 要求 `Amount` 必须大于 0
+    - 如果客户端传 `0` 或负数，模型校验失败
+    - 因为 Controller 上有 `[ApiController]`，框架会自动返回 400
+
+2. 删除 `Create` Action 里手写的金额判断
+
+    **只删除**这段：
+
+    ```c#
+    if (request.Amount <= 0)
+    {
+        return BadRequest(new { message = "Amount must be greater than 0." });
+    }
+    ```
+
+    修改后的 `Create` 方法：
+
+    ```c#
+    [HttpPost]
+    public ActionResult Create(OrderCreateRequest request)
+    {
+        var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
+        var order = new OrderItem(nextId, request.Amount, "Created");
+        Orders.Add(order);
+    
+        var response = ToResponse(order);
+        return CreatedAtAction(
+            nameof(GetById),
+            new { id = response.Id },
+            response
+        );
+    }
+    ```
+
+    请求进入 `Create(OrderCreateRequest request)` 之前，框架已经做了两件事：
+
+    - **模型绑定**：把 JSON body 转成 `OrderCreateRequest`
+    - **模型验证**：检查 `[Range]` 等注解规则是否满足
+
+    如果验证失败，Action 根本不会执行到。所以删掉 `if (request.Amount <= 0)` 后，功能仍然成立，而且代码更干净。
+
+#### 5. 小结
+
+把“基础输入校验”从 Action 里移到了 DTO 上，并交给框架自动处理：
+
+- 校验规则更集中（在 Request DTO）
+- Controller 更干净
+- 错误返回更统一
+
+这一步非常关键，因为它让接口开始具备“可维护性”。
+
+**新的问题来了？**
+
+这一章虽然解决的是“输入格式/范围是否合法”，例如金额不能小于等于 0。
+
+但还有一种错误不是输入格式问题，而是**业务规则问题**。
+
+例如在订单场景里：
+
+- 一个已经支付过的订单再次支付
+- 当前状态不允许执行某个动作
+
+这种错误即使输入格式完全正确，也应该失败，而且通常不是 `400`，而是更适合映射成 `409 Conflict` 等状态码。
+
+这就需要对**业务错误与异常（把领域规则映射成 HTTP 响应）**的处理。

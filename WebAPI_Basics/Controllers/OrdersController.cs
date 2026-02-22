@@ -37,10 +37,10 @@ public class OrdersController : ControllerBase
     [HttpPost]
     public ActionResult Create(OrderCreateRequest request)
     {
-        if (request.Amount <= 0)
-        {
-            return BadRequest(new { message = "Amount must be greater than 0." });
-        }
+        // if (request.Amount <= 0)
+        // {
+        //     return BadRequest(new { message = "Amount must be greater than 0." });
+        // }
 
         var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
         var order = new OrderItem(nextId, request.Amount, "Created");
