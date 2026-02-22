@@ -1002,3 +1002,238 @@ public class OrdersController : ControllerBase
 这种错误即使输入格式完全正确，也应该失败，而且通常不是 `400`，而是更适合映射成 `409 Conflict` 等状态码。
 
 这就需要对**业务错误与异常（把领域规则映射成 HTTP 响应）**的处理。
+
+### 6. 业务错误与异常
+
+把业务规则错误映射成正确的 HTTP 响应
+
+#### 1. 解决什么问题？
+
+上一章已经把“输入是否合法”交给框架处理了，例如：
+
+- 金额必须大于 0 → 自动返回 `400`
+
+但还有一类错误不属于输入格式问题，而是**业务规则不允许**。
+
+在订单场景里最典型的例子就是：**重复支付**。
+
+例如：
+
+- 请求格式完全正确（`id` 是合法整数）
+- 订单也存在
+- 但订单状态已经是 `Paid`
+
+这时候失败的原因不是“请求写错了”，而是“当前业务状态不允许这个动作”。
+
+因此，我们需要解决的是：**如何在代码里表达这种业务错误，并把它返回成合适的 HTTP 状态码（例如 409）**
+
+#### 2. 输入错误 vs 业务错误
+
+先明确区分：输入错误 vs 业务错误。这一步很关键，因为它决定你返回什么状态码:
+
+- 输入错误（第5章处理）
+
+    客户端提交的数据本身不符合接口要求，例如：
+
+    - `amount <= 0`
+    - 缺字段
+    - 类型不匹配
+
+    这类问题通常是 `400 BadRequest`。
+
+- 业务错误（本章处理）
+
+    输入格式没问题，但当前业务规则不允许操作，例如：
+
+    - 订单不存在（按当前接口语义，查询/动作目标不存在）
+    - 订单已支付，不能再次支付
+
+    这类问题应该映射成更准确的状态码，例如：
+
+    - `404 NotFound`
+    - `409 Conflict`
+
+#### 3. 用“异常”来表达业务错误
+
+为什么用“异常”来表达业务错误?
+
+因为业务动作（比如支付）执行过程中，可能在多个地方失败：
+
+- 查不到订单
+- 状态不允许支付
+- 以后还可能有更多规则
+
+如果每一步都返回布尔值或字符串，Controller 很快会充满判断分支，逻辑会变乱。
+
+用异常的方式可以把失败原因直接表达出来：
+
+- `NotFoundException`
+- `ConflictException`
+
+然后在 Controller 中统一捕获，并翻译成 HTTP 响应。
+
+这样结构会更清晰：
+
+- 业务层负责“为什么失败”
+- Controller 负责“失败时返回什么 HTTP 状态码”
+
+#### 4. 使用 try catch 分层异常处理
+
+以pay方法为例，可以使用 if + return 的形式处理异常， 比如：
+
+```c#
+if (order is null)
+    return NotFound();
+```
+
+但是，业务逻辑里，不应该写 `return NotFound()` / `return Conflict()`， 这是HTTP响应的东西。
+
+我们需要**建立“业务错误”和“HTTP响应”分离的意识**：
+
+- 业务错误： 
+    - 发现订单不存在 → `throw OrderNotFoundException`
+    - 发现已支付 → `throw OrderConflictException`
+- HTTP响应：
+    - `return NotFound()` → 响应码404
+    - `return Conflict()`→ 响应码409
+
+因此，使用try catch语句进行分层：
+
+- 在 `try` 里，代码站在“业务动作”的角度思考
+
+    通过**throw**：表达“业务失败了，失败类型是什么”
+
+- 在 `catch` 里，代码站在“Web API 响应”的角度思考
+
+    **catch**：把这个失败翻译成“HTTP 响应是什么”
+
+#### 5. 如何操作
+
+在当前代码基础上加入“支付动作”和业务异常映射。
+
+- 我们在现有 `OrdersController` 基础上增加一个支付接口：
+    - `POST /orders/{id}/pay`
+- 并加入两种业务错误映射：
+    - 订单不存在 → `404`
+    - 订单已支付 → `409`
+
+#### 6. 代码实现
+
+- 新增业务异常类型
+
+    新建文件夹和文件：`Domain/OrderExceptions.cs`
+
+    ```c#
+    public class OrderNotFoundException(int id) : Exception($"Order with id {id} was not found.");
+    
+    public class OrderConflictException(string message) : Exception(message);
+    ```
+
+    使用新语法：主构造器 - 直接在类名中传递参数。
+
+    先定义两个明确的异常类型来表达业务失败原因：
+
+    - `OrderNotFoundException`
+    - `OrderConflictException`
+
+    后面 Controller 捕获时就能精准映射状态码。
+
+- 在 `OrdersController` 中增加支付接口
+
+    在第5章的 `OrdersController` 基础上，新增一个 Action（其余代码保持不变）：
+
+    ```c#
+    [HttpPost("{id:int}/pay")]
+        public ActionResult<OrderResponse> Pay(int id)
+        {
+            try
+            {
+                var order = Orders.FirstOrDefault(x => x.Id == id);
+                if (order == null)
+                    throw new OrderNotFoundException(id);
+                if (order.Status == "Paid")
+                    throw new OrderConflictException("Order is already paid");
+                order.Status = "Paid";
+                
+                return Ok(ToResponse(order));
+            }
+            catch (OrderNotFoundException)
+            {
+                return NotFound();
+            }
+            catch (OrderConflictException ex)
+            {
+                return Conflict(new { message = ex.Message });
+            }
+        }
+    ```
+
+    这里发生了什么变化？
+
+    - 新增了一个动作型接口
+
+        路径是：`POST /orders/{id}/pay`
+
+        它表示对订单执行一个明确动作：**支付**。这和普通查询接口不同，因为它会改变订单状态。
+
+    - 用异常表达业务失败原因
+
+        使用try语句抛出异常，停止后续的代码执行。
+
+        在支付过程中：
+
+        - 找不到订单 → 抛 `OrderNotFoundException`
+        - 已支付订单再次支付 → 抛 `OrderConflictException`
+
+        这样主流程会更清楚：
+
+        - 查订单
+        - 判断状态
+        - 修改状态
+        - 返回结果
+
+        失败分支通过异常表达，不和主流程混在一起。
+
+    - 把业务错误映射成 HTTP 响应
+
+        在 `catch` 中完成映射：
+
+        - `OrderNotFoundException` → `404 NotFound`
+        - `OrderConflictException` → `409 Conflict`
+
+- 运行代码验证：
+
+    - 支付一个未支付订单（成功）
+
+        `200 OK`
+
+        返回订单状态变为 `Paid`
+
+    - 支付不存在的订单
+
+        `404 NotFound`
+
+    - 重复支付同一个订单
+
+        `409 Conflict`
+
+        返回错误信息（`Order is already paid.`）
+
+#### 7. 小结
+
+现在可以区分两类失败，并用不同方式处理：
+
+- 输入校验失败 → 框架自动 `400`
+- 业务规则失败 → 抛业务异常，再映射为 `404 / 409`
+
+这让 API 从“能跑”进一步变成“语义清楚”。
+
+**新的问题来了？**
+
+现在 `Pay` 接口已经能处理业务错误，但会发现一个新问题：
+
+- 支付逻辑、查询逻辑、创建逻辑都堆在 `OrdersController` 里
+- Controller 开始变厚
+- 后面动作一多，会越来越难维护
+
+因此，我们需要把“HTTP 接口层”和“业务流程层”分开。
