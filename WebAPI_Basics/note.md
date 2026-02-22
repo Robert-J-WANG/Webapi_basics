@@ -292,3 +292,173 @@ public class Program
 ```http
 http://localhost:5085/scalar/
 ```
+
+
+
+### 2. 路由与 Action：把“方法调用”变成“HTTP 调用”
+
+#### 1. 有什么问题？
+
+在 Console 项目里，调用订单查询是这样：
+
+```c#
+orderService.GetById(1);
+```
+
+但在 Web API 里，客户端不会直接调用你的 C# 方法，它只能发 HTTP 请求。
+
+所以同样的查询动作，要变成端点动作（endpoint)：
+
+```http
+GET /orders
+GET /orders/1
+```
+
+**问题来了：**
+
+1. 请求进来后，**谁来接收**？
+
+2. `GET` 和 `POST` 怎么区分？
+
+3. `/orders/1` 里的 `1` 怎么传进 C# 方法参数？
+
+    
+
+#### 2. Controller、Action、Route
+
+Controller 负责把请求动作按业务资源分类， 比如订单相关端点动作放在 `OrdersController`，用户相关端点动作放在 `UsersController，**Controller 是一个个不同的class。**
+
+Action 是“具体的端点动作”，就是Controller 里的每一个 `public` 方法。 例如在 `OrdersController` 里：
+
+- `GetAll()` 对应“查全部订单”
+- `GetById(int id)` 对应“按 id 查订单”
+
+Route 是“匹配规则”。Route 决定：某个 URL 请求是否能进入这个 Controller / Action。
+
+**Controller 文件结构：**
+
+```c#
+[ApiController]          // 开启 API 模式
+[Route("api/[controller]")] // 1. 基路径 (例如: /api/Weather)
+public class WeatherController : ControllerBase
+{
+    [HttpGet]            // 2. 动词 -> 对应 URL: GET /api/Weather
+    public IEnumerable<Data> Get() { ... }
+
+    [HttpGet("today")]   // 3. 子路径 -> 对应 URL: GET /api/Weather/today
+    public Data GetToday() { ... }
+}
+```
+
+方括号 `[]` 被称为**特性（Attributes）**：
+
+这些 `[ApiController]`、`[Route]`、`[HttpGet]` 等都定义在 **`Microsoft.AspNetCore.Mvc.Core`** 这个动态链接库（DLL）中。
+
+当创建一个 Web API 项目时，.NET SDK 会自动引用这些库。
+
+通过添加这些特性标识，框架能自动完成一些动作。比如自动模型验证，参数绑定，自动过滤非法格式请求等等。
+
+controller中必须的3个特性标识：
+
+- `[ApiController]`
+
+    写在整个文件的最开始（`class` 关键字的上方），对**整个类**的声明。框架会自动处理 JSON 序列化、错误拦截和参数绑定。
+
+- `[Route]（基路径）`
+
+    是这个类里所有方法的**共有地址前缀**。通常建议写成 `[Route("[controller]")]`, 比如你的类叫 `OrderController`，那么访问这个类里任何方法的起始地址都是 `/Order`。
+
+- `[HttpGet]` / `[HttpPost]` (动作约束)
+
+    是对类里面**单个 Action 方法**的详细定义。 规定这个方法对应哪种“动作”（GET, POST, PUT, DELETE）。
+
+
+
+#### 3. 创建OrdersController
+
+先创建一个订单的controller， 包含2个上面提到的动作
+
+```c#
+using Microsoft.AspNetCore.Mvc;
+
+namespace WebAPI_Basics.Controllers;
+
+[ApiController]
+[Route("[controller]")]
+public class OrdersController:ControllerBase
+{
+    private record OrderItem(int Id, decimal Amount, string Status);
+
+    private static readonly List<OrderItem> Orders =
+    [
+        new(1, 100m, "Created"),
+        new(2, 200m, "Paid")
+    ];
+    [HttpGet]
+    public IActionResult GetAll()
+    {
+        return Ok(Orders);
+    }
+
+    [HttpGet("{id:int}")]
+    public IActionResult GetById(int id)
+    {
+        var order=Orders.FirstOrDefault(x=>x.Id==id);
+        if (order == null)
+        {
+            return NotFound();
+        }
+        return Ok(order);
+    }
+}
+```
+
+一些解释：
+
+- 继承内置的**ControllerBase基类**
+
+- 方法的返回类型：**IActionResult**
+
+    使用内置的统一功能的接口，通过调用内置的不同方法来返回相同格式的数据（响应码+响应结果(数据或者错误)）。
+
+​	`Ok(Orders)`  - 表示返回 **200 OK**，并把对象序列化成 JSON。
+
+​	`NotFound()` - 表示返回 **404 Not Found**
+
+Web API 和 Console 的区别：
+
+Console 可以返回 `null`；Web API 需要表达 **HTTP 语义**（200 / 404）。
+
+**运行后的结果：**
+
+- `GET /orders`  - 返回两条订单数据（200）
+
+- `GET /orders/1` - 返回单条订单（200）
+
+- `GET /orders/999` - 返回 404
+
+- `GET /orders/abc` - 不会匹配到这个 Action（因为路由要求 `id:int`）
+
+
+
+#### 4. 小结
+
+从“方法调用思维”到“HTTP 接口思维”的第一步：
+
+- 用 **Controller** 承接请求
+
+- 用 **Route + HttpGet** 把 URL 映射到 Action
+
+- 用 **路径参数绑定** 把 `/orders/1` 变成 `int id`
+
+- 用 **HTTP 状态码** 表达结果（200 / 404）
+
+**新的问题来了？？**
+
+现在接口能跑了，但还有两个明显问题：
+
+1. 返回的数据结构是临时写的 `OrderItem`，不适合作为正式 API 输出模型
+2. 还不能创建订单（`POST /orders`），也就是说客户端的 JSON 请求体还没法进入 C# 对象
+
+
+
