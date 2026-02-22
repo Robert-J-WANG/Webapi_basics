@@ -640,3 +640,215 @@ Controller 不再直接把内部 `OrderItem` 返回给客户端，而是先转�
 
 这些问题都属于 **HTTP 状态码与返回结果设计**，下一章就会系统解决。
 
+### 4. 返回结果与状态码：让接口表达清楚“成功 / 失败”的含义
+
+#### 1. 解决什么问题？
+
+第3章里我们已经能创建订单，也能查询订单，但现在返回结果还不够规范：
+
+- 创建成功时直接返回 `200 OK`
+- 创建后没有告诉客户端“新资源在哪里”
+- 输入不合理（例如 `amount <= 0`）时还没有明确的错误响应
+
+也就是说，接口虽然能用，但 **HTTP 语义还不完整**。
+
+这一章要解决的是：**让接口不仅返回数据，还返回正确的状态码和响应含义**。
+
+#### 2. 为什么状态码很重要？
+
+Web API 不只是“把数据吐出去”，它还要告诉客户端这次请求发生了什么：
+
+- 成功查询到了 → `200 OK`
+- 成功创建了 → `201 Created`
+- 请求参数不合法 → `400 BadRequest`
+- 资源不存在 → `404 NotFound`
+- 当前状态不允许该操作 → `409 Conflict`（这一章先建立认识，后面会正式用到）
+
+这样客户端（前端、移动端、其他服务）才能根据状态码做正确处理。
+
+#### 3. 优化OrdersController
+
+围绕当前 `OrdersController` 做三件事：
+
+1. 把返回类型从 `IActionResult` 调整为 `ActionResult<T>`（让返回结果更清晰）
+
+    **`ActionResult<T>` 是什么？为什么要用？**
+
+    之前我们写的是接口：
+
+    ```c#
+    public IActionResult GetById(int id)
+    ```
+
+    这当然可以，但它只表达“返回一个动作结果”，没有表达“成功时返回的具体数据类型”。
+
+    如果改成：
+
+    ```c#
+    public ActionResult<OrderResponse> GetById(int id)
+    ```
+
+    意思就更清楚了：
+
+    - 成功时通常返回 `OrderResponse`
+    - 失败时仍然可以返回 `NotFound()`、`BadRequest()` 等状态结果
+
+    这会让接口签名更有表达力，也更利于接口文档展示。
+
+2. `POST /orders` 使用 `201 Created`，并返回资源地址
+
+    **为什么创建资源应该返回 `201 Created`？**
+
+    当客户端调用 `POST /orders` 创建新订单时，这不是普通查询成功，而是**新资源被创建**。
+
+    HTTP 语义里更合适的表达是：
+
+    - **`201 Created`**
+    - 并带上新资源地址（Location），例如 `/orders/3`
+
+    ASP.NET Core 里常用写法是：
+
+    ```c#
+    CreatedAtAction(...)
+    ```
+
+    **CreatedAtAction**这个方法，它会自动返回：
+
+    - 状态码 `201`
+    - Location 头
+    - 响应体（你传入的对象）
+
+3. 对明显错误输入（`amount <= 0`）返回 `400 BadRequest`
+
+    **输入错误如何表达？**
+
+    创建订单时，如果金额小于等于 0，这种请求即使格式是合法 JSON，也不应该创建成功。
+
+    例如：
+
+    ```c#
+    {
+      "amount": 0
+    }
+    ```
+
+    这种情况更适合返回：
+
+    - `400 BadRequest`
+
+    因为这是客户端提交的数据不符合接口要求。
+
+优化升级后的代码：
+
+```c#
+[ApiController]
+[Route("[controller]")]
+public class OrdersController : ControllerBase
+{
+    ...
+
+    [HttpGet]
+    public ActionResult GetAll()
+    {
+        var result = Orders.Select(ToResponse).ToList();
+        return Ok(result);
+    }
+
+    [HttpGet("{id:int}")]
+    public ActionResult GetById(int id)
+    {
+        var order = Orders.FirstOrDefault(x => x.Id == id);
+        if (order == null)
+        {
+            return NotFound();
+        }
+
+        return Ok(ToResponse(order));
+    }
+
+    [HttpPost]
+    public ActionResult Create(OrderCreateRequest request)
+    {
+        if (request.Amount <= 0)
+        {
+            return BadRequest(new { message = "Amount must be greater than 0." });
+        }
+
+        var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
+        var order = new OrderItem(nextId, request.Amount, "Created");
+        Orders.Add(order);
+
+        var response = ToResponse(order);
+        return CreatedAtAction(
+            nameof(GetById),
+            new { id = response.Id },
+            response
+        );
+    }
+	...
+}
+```
+
+#### 4. 关键的变化：
+
+- 查询接口：成功返回 `200`，找不到返回 `404`
+
+    `GetById` 现在明确表达了两种情况：
+
+    - 找到 → `Ok(OrderResponse)`（200）
+    - 找不到 → `NotFound()`（404）
+
+    这就是“查询类接口”的基本语义。
+
+- 创建接口：成功返回 `201 Created`
+
+    `Create` 不再返回 `Ok(...)`，而是：
+
+    ```c#
+    return CreatedAtAction(
+        nameof(GetById),
+        new { id = response.Id },
+        response);
+    ```
+
+    这段的含义是：
+
+    - `nameof(GetById)`：告诉框架“新资源可以通过这个 Action 获取”
+    - `new { id = response.Id }`：给这个 Action 提供路由参数
+    - `response`：响应体内容
+
+    最终客户端会得到：
+
+    - `201 Created`
+    - Location（指向 `/orders/{id}`） - 响应头里
+    - 新创建的订单数据 - 响应体中
+
+- 输入不合理：返回 `400 BadRequest`
+
+    `amount <= 0` 的判断现在明确映射为 `400`：
+
+    ```c#
+    return BadRequest(new { message = "Amount must be greater than 0." });
+    ```
+
+    这一步开始建立“输入错误 ≠ 服务器错误”的意识。
+
+- 另外，对返回的数据进行了`ToResponse `辅助方法的转换，对齐返回数据的类型。
+
+#### 5. 小结
+
+现在不仅能“写接口”，还能开始用 **HTTP 语义**表达业务结果：
+
+- 查询成功 / 失败
+- 创建成功
+- 输入错误
+
+这一步非常关键，因为 Web API 的专业感，很多时候就体现在状态码和返回结果是否清晰、稳定。
+
+**新的问题来了？？**
+
+现在 `amount <= 0` 是在 Action 里手写 `if` 判断。
+
+如果以后字段变多（比如 `CustomerName`、`OrderType`、`Email`），每个接口都手写 `if` 会很快变乱。
+
+因此，需要“参数是否合法”的基础校验的合理处理。
