@@ -63,7 +63,7 @@ public class OrdersController(OrderService service) : ControllerBase
 
 
     //辅助方法： 把OrderItem转换成OrderResponse
-    private OrderResponse ToResponse(OrderService.OrderItem order)
+    private OrderResponse ToResponse(Order order)
     {
         return new OrderResponse
         {

@@ -5,22 +5,15 @@ namespace WebAPI_Basics.Services;
 
 public class OrderService
 {
-    public class OrderItem
-    {
-        public int Id { get; set; }
-        public decimal Amount { get; set; }
-        public string Status { get; set; } = string.Empty;
-    }
-
-    private static readonly List<OrderItem> Orders =
+    private static readonly List<Order> Orders =
     [
-        new OrderItem
+        new Order
         {
             Id = 1,
             Amount = 100m,
             Status = "Created"
         },
-        new OrderItem
+        new Order
         {
             Id = 2,
             Amount = 200m,
@@ -28,12 +21,12 @@ public class OrderService
         }
     ];
 
-    public List<OrderItem> GetAll()
+    public List<Order> GetAll()
     {
         return Orders.ToList();
     }
 
-    public OrderItem GetById(int id)
+    public Order GetById(int id)
     {
         var order = Orders.FirstOrDefault(o => o.Id == id);
         if (order is null)
@@ -41,10 +34,10 @@ public class OrderService
         return order;
     }
 
-    public OrderItem Create(OrderCreateRequest request)
+    public Order Create(OrderCreateRequest request)
     {
         var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
-        var order = new OrderItem()
+        var order = new Order()
         {
             Id = nextId,
             Amount = request.Amount,
@@ -54,7 +47,7 @@ public class OrderService
         return order;
     }
 
-    public OrderItem Pay(int id)
+    public Order Pay(int id)
     {
         var order = Orders.FirstOrDefault(x => x.Id == id);
         if (order is null)

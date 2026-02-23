@@ -1534,3 +1534,243 @@ if (order is null)
 
 **因此， 需要先把订单模型从 Service 内部独立出来，理顺跨层数据传递边界。**
 
+### 8. 引入model（模型）层
+
+#### 1. 解决什么问题？
+
+第7章引入 `OrderService` 后，Controller 里的业务流程代码已经变少了，但代码里出现了一个新的结构问题：
+
+- `OrderItem` 实际上已经不只是 `OrderService` 的内部细节，而是变成了在不同层之间传递的数据模型。
+
+当一个模型已经被多个位置使用时，把它放在 `OrderService` 内部就不太合适了。
+
+因此：需要把订单模型从 `OrderService` 内部独立出来，形成统一的 `Order` 模型，让代码结构更清晰、类型依赖更自然。
+
+#### 2. 模型职责
+
+先明确模型的边界：
+
+- DTO（接口输入输出模型）
+
+    用于 HTTP 层（Controller 和客户端通信）：
+
+    - `	OrderCreateRequest`
+    - `OrderResponse`
+
+    它们的职责是：**接口契约**，不是业务层的通用模型。
+
+- 定义一个Order（业务层共享模型）
+
+    用于当前阶段的跨层传递：
+
+    - Controller（映射前）
+    - Service
+    - 存储（后面可能会出现）
+
+    它的职责是：**在应用内部表示订单数据**。
+
+#### 3. 如何操作？
+
+只做“模型收口”，不改业务行为，不改状态码，不改异常处理逻辑。
+
+改动顺序：
+
+1. 新增 `Domain/Order.cs`
+2. `OrderService` 去掉嵌套 `OrderItem`，改用 `Order`
+3. `OrdersController` 的 `ToResponse(...)` 改参数类型
+4. 验证行为不变
+
+#### 4. 代码实现
+
+- 定义统一的订单模型 `Order`
+
+    新建文件：`Domain/Order.cs`
+
+    ```c#
+    public class Order
+    {
+        public int Id { get; set; }
+        public decimal Amount { get; set; }
+        public string Status { get; set; } = string.Empty;
+    }
+    ```
+
+    **为什么这里用 `Order` 这个名字？**
+
+    因为这一章调整的是“订单模型”的位置与职责。
+
+    它已经不是 `OrderService` 里的一个内部临时类型，而是明确表示“订单数据”的模型，所以直接用 `Order` 更自然。
+
+- 修改 `OrderService`（去掉嵌套 `OrderItem`），使用公共的Order
+
+    ```c#
+    public class OrderService
+    {
+        private static readonly List<Order> Orders =
+        [
+            new Order
+            {
+                Id = 1,
+                Amount = 100m,
+                Status = "Created"
+            },
+            new Order
+            {
+                Id = 2,
+                Amount = 200m,
+                Status = "Paid"
+            }
+        ];
+    
+        public List<Order> GetAll()
+        {
+            return Orders.ToList();
+        }
+    
+        public Order GetById(int id)
+        {
+            var order = Orders.FirstOrDefault(o => o.Id == id);
+            if (order is null)
+                throw new OrderNotFoundException(id);
+            return order;
+        }
+    
+        public Order Create(OrderCreateRequest request)
+        {
+            var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
+            var order = new Order()
+            {
+                Id = nextId,
+                Amount = request.Amount,
+                Status = "Created"
+            };
+            Orders.Add(order);
+            return order;
+        }
+    
+        public Order Pay(int id)
+        {
+            var order = Orders.FirstOrDefault(x => x.Id == id);
+            if (order is null)
+                throw new OrderNotFoundException(id);
+            if (order.Status == "Paid")
+                throw new OrderConflictException($"Order {id} was already paid");
+            order.Status = "Paid";
+            return order;
+        }
+    }
+    ```
+
+    ```c#
+    public class OrderService
+    {
+        private static readonly List<Order> Orders =
+        [
+            new Order
+            {
+                Id = 1,
+                Amount = 100m,
+                Status = "Created"
+            },
+            new Order
+            {
+                Id = 2,
+                Amount = 200m,
+                Status = "Paid"
+            }
+        ];
+    
+        public List<Order> GetAll()
+        {
+            return Orders.ToList();
+        }
+    
+        public Order GetById(int id)
+        {
+            var order = Orders.FirstOrDefault(o => o.Id == id);
+            if (order is null)
+                throw new OrderNotFoundException(id);
+            return order;
+        }
+    
+        public Order Create(OrderCreateRequest request)
+        {
+            var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
+            var order = new Order()
+            {
+                Id = nextId,
+                Amount = request.Amount,
+                Status = "Created"
+            };
+            Orders.Add(order);
+            return order;
+        }
+    
+        public Order Pay(int id)
+        {
+            var order = Orders.FirstOrDefault(x => x.Id == id);
+            if (order is null)
+                throw new OrderNotFoundException(id);
+            if (order.Status == "Paid")
+                throw new OrderConflictException($"Order {id} was already paid");
+            order.Status = "Paid";
+            return order;
+        }
+    }
+    ```
+
+​	`OrderItem`不再适合作为长期跨层模型, Service 对外返回的“订单”已经有了稳定位置（`Domain`）
+
+- 修改 `OrdersController` 的响应转换方法
+
+    ```c#
+    //辅助方法： 把OrderItem转换成OrderResponse
+        private OrderResponse ToResponse(Order order)
+        {
+            return new OrderResponse
+            {
+                Id = order.Id,
+                Amount = order.Amount,
+                Status = order.Status,
+            };
+        }
+    ```
+
+- **代码结构有什么变化？**
+
+    表面上看只是改了类型名和类型位置，但结构上更清楚了：
+
+    - Controller 不再依赖 `OrderService` 内部嵌套类型
+    - `Order` 成为统一的订单模型
+    - `OrderCreateRequest` / `OrderResponse` 仍然只负责接口输入输出
+
+#### 5. 用 Scalar 测试
+
+接口行为应该与上一章保持一致。用 Scalar 测试这些接口即可：
+
+- `GET /orders`
+- `GET /orders/{id}`
+- `POST /orders`
+- `POST /orders/{id}/pay`
+
+#### 6. 小结
+
+这一章完成了一个关键收口：
+
+- 把已经跨层使用的订单模型从 `OrderService` 内部提出来
+- 用统一的 `Order` 模型替代 `OrderService.OrderItem`
+- 保持 Controller 的响应映射写法一致（`ToResponse(Order order)`）
+
+这样后面的代码会更清晰，也更容易继续扩展。
+
+**新的问题来了？**
+
+现在 `OrderService` 的业务流程已经比较清楚，但它还在直接维护内存列表并处理数据读写。
+
+也就是说，Service 里同时放着两类职责：
+
+- 业务流程
+- 数据存取
+
+因此需要对Service再分层，只保留业务流程
+
