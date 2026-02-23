@@ -2028,3 +2028,211 @@ Controller 的职责和行为保持不变。
 这些对象是谁创建的？为什么会自动注入？
 
 我们在 `Program.cs` 里写了 `AddScoped(...)`，但还没有系统解释它背后的规则。
+
+
+
+### 10. DI：注册与注入（把对象创建交给框架）
+
+#### 1. 要解决什么问题？
+
+我们已经把核心代码拆成了三层：
+
+- Controller
+- Service
+- Repository
+
+并且在 `Program.cs` 里写了这样的注册代码：
+
+```c#
+builder.Services.AddScoped<OrderService>();
+builder.Services.AddScoped<IOrderRepository,InMemoryOrderRepository > ();    
+```
+
+同时，`OrdersController` 和 `OrderService` 的构造函数里也写了依赖参数：
+
+- `OrdersController(OrderService service)`
+- `OrderService(IOrderRepository repo)`
+
+问题来了：
+
+1. 这些对象是谁创建的？
+2. 为什么我没有 `new OrderService(...)`，它却能用？
+3. `AddScoped(...)` 到底在做什么？
+
+这一章要解决的就是：**ASP.NET Core 中依赖注入（DI）的基本工作方式**。
+
+#### 2. DI 的用途
+
+如果不用 DI，就需要再在 Controller 里手动创建依赖：
+
+```c#
+var repo = new InMemoryOrderRepository();
+var service = new OrderService(repo);
+```
+
+这样会带来两个问题：
+
+- 上层代码知道太多底层细节（耦合高）
+- 对象创建到处都是，后面越来越难维护
+
+DI 的做法是：
+
+- 只声明“我需要什么”（构造函数参数）
+- 框架负责“怎么创建并传给你”
+
+也就是说：
+
+- `OrdersController` 只说：我需要 `OrderService`
+- `OrderService` 只说：我需要 `IOrderRepository`
+- 框架根据 `Program.cs` 的注册规则，把对象串起来创建好
+
+#### 3. `builder.Services.AddScoped(...)` 到底在做什么？
+
+这行代码的本质是：**向 DI 容器注册“类型映射规则”**。
+
+例子1：注册具体类型
+
+```c#
+builder.Services.AddScoped<OrderService>();
+```
+
+意思是：
+
+- 容器里登记一个规则：`OrderService` 可以被创建和注入
+
+例子2：注册接口到实现类的映射
+
+```
+builder.Services.AddScoped<IOrderRepository,InMemoryOrderRepository>();
+```
+
+意思是：
+
+- 当有人需要 `IOrderRepository` 时
+- 实际给它一个 `InMemoryOrderRepository`
+
+这就是为什么 `OrderService` 构造函数里写的是接口：
+
+```
+public OrderService(IOrderRepository repo)
+```
+
+但运行时仍然能拿到具体对象。
+
+#### 4. “注入”是怎么发生的？（结合你当前代码）
+
+**第一步：请求进来，框架要创建 `OrdersController`**
+
+框架看到 Controller 构造函数：
+
+```
+public OrdersController(OrderService service)
+```
+
+它就知道：创建 `OrdersController` 之前，得先准备一个 `OrderService`。
+
+**第二步：框架去容器里找 `OrderService` 的注册规则**
+
+你在 `Program.cs` 里已经注册了：
+
+```
+builder.Services.AddScoped<OrderService>();
+```
+
+所以框架知道它可以创建 `OrderService`。
+
+但创建 `OrderService` 时，框架又发现它的构造函数需要 `IOrderRepository`。
+
+**第三步：继续解析 `IOrderRepository`**
+
+框架再去容器里找：
+
+```
+builder.Services.AddScoped<IOrderRepository, InMemoryOrderRepository>();
+```
+
+找到了，就创建 `InMemoryOrderRepository`，再传给 `OrderService`，最后把 `OrderService` 传给 `OrdersController`。
+
+这就是依赖注入在运行时的基本过程。
+
+#### 5. 控制反转（IoC）
+
+以前是自己写：
+
+- `new Repo()`
+- `new Service(repo)`
+- `new Controller(service)`
+
+现在变成：
+
+- 只声明依赖
+- 框架按注册规则创建对象并注入
+
+对象创建的控制权从自己的业务代码转移到了框架（容器），这就是 IoC 的直观含义。
+
+#### 6. 为什么构造函数注入是最常见方式？
+
+因为它有三个优点：
+
+- 依赖一眼可见 - 看构造函数参数就知道这个类需要什么。
+- 依赖是“必须的” - 没有这些依赖，对象就不能被正确创建。
+- 更容易测试 - 以后做单元测试时，可以传入假的 Repository（Mock/Fake）来测试 Service。
+
+#### 7. “生命周期”设置
+
+`Scoped / Transient / Singleton` 是什么？
+
+它们是 DI 注册时的“生命周期”设置，决定对象在多长范围内复用。
+
+当前先建立基础认知即可：
+
+- `AddTransient` - 每次要用时都创建一个新对象：
+
+    - 要一次，给一次新的
+    - 不复用
+
+- `AddScoped` - 同一个请求范围内复用同一个对象。
+
+    - 一次 HTTP 请求里如果多次用到同一种服务，通常会复用
+    - 下一个请求再创建新的
+
+    **这是 Web API 里很常用的生命周期。**
+
+- `AddSingleton`  -  整个应用启动后只创建一次，后面一直复用同一个对象。
+    - 全局单例
+    - 生命周期最长
+
+**为什么我们当前用 `AddScoped`？**
+
+现在的 `OrderService` 和 `Repository` 都是和“请求处理流程”密切相关的组件。
+
+使用 `Scoped` 的好处是：
+
+- 生命周期和一次请求比较匹配
+- 不会像 Singleton 那样长期共享同一个实例（更容易引出状态问题）
+- 也不像 Transient 那样每次解析都创建新对象（通常没必要）
+
+在后面接触数据库（例如 EF Core DbContext）时，会更清楚为什么很多组件默认是 Scoped。
+
+#### 8. 小结
+
+这一章解释当前项目里对象是怎么串起来的：
+
+- Controller 不是手动 `new`
+- Service / Repository 也不是随便出现的
+- 它们是由 DI 容器根据 `Program.cs` 的注册规则自动创建并注入的
+
+这一步非常重要，因为后面加更多层（日志、配置、数据库上下文）都离不开这套机制。
+
+**新的问题来了？**
+
+现在结构已经比较清楚了，但所有方法仍然是同步写法：
+
+- `GetById(...)`
+- `Create(...)`
+- `Pay(...)`
+
+当前用内存列表问题不大，但真实项目里很多操作都会涉及 IO（数据库、网络调用），如果还用同步方式，会影响吞吐和响应能力。
+
+这就需要**Async Web API：把同步接口改成 `async` + `Task`**。
+
