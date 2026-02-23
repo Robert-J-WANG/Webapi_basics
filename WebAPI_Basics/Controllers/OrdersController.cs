@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using WebAPI_Basics.Domain;
 using WebAPI_Basics.Dtos.Requests;
@@ -60,6 +61,36 @@ public class OrdersController(OrderService service) : ControllerBase
         catch (OrderConflictException ex)
         {
             return Conflict(new { message = ex.Message });
+        }
+    }
+
+    [HttpDelete("{id:int}")]
+    public async Task<ActionResult<int>> Delete(int id, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await service.DeleteAsync(id, cancellationToken);
+            return Ok(new { Message = $"order {id} is deleted。" });
+        }
+        catch (OrderNotFoundException)
+        {
+            return NotFound();
+        }
+    }
+
+    [HttpPut("{id:int}")]
+    public async Task<ActionResult<Order>> Update(int id, OrderUpdateQueryRequest query,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var order = await service.UpdateAsync(id, query, cancellationToken);
+            return Ok(ToResponse(order));
+        }
+        catch (OrderNotFoundException)
+        {
+
+            return NotFound();
         }
     }
 

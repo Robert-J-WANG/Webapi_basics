@@ -3202,3 +3202,347 @@ Repository 暂时不改（仍然返回全部数据给 Service 处理）。
 
 因此，需要对项目结构与命名的约定。
 
+### 14. 项目结构与命名约定
+
+#### 1. 解决什么问题？
+
+让代码在继续增长时不乱
+
+Order Web API 已经具备了完整的基础能力：
+
+- 路由与 Action
+- DTO 与模型绑定
+- 状态码语义
+- 输入验证
+- 业务异常映射
+- Controller / Service / Repository 分层
+- DI
+- async/await + CancellationToken
+- Query 参数（过滤 / 排序 / 分页）
+
+功能已经能跑起来了，但这时会出现另一个问题：**项目规模一变大，代码很容易乱**。
+
+典型表现是：
+
+- 新文件不知道放哪
+- 命名风格前后不一致
+- Controller 里混入 DTO / 业务类
+- 以后回头看代码时定位困难
+
+这一章要解决的是：**给当前项目建立一套稳定、容易扩展的文件结构与命名约定**。
+
+这样后面继续加数据库、认证、日志时，代码不会失控。
+
+#### 2. 对齐当前项目里的角色
+
+现在已经有这些角色（概念上）：
+
+- **Controller**：处理 HTTP 请求与响应
+- **Service**：处理业务流程
+- **Repository**：处理数据存取
+- **DTO**：定义接口输入输出结构
+- **Domain**：领域概念（异常、状态、后面还会有实体/枚举等）
+
+这些角色在项目目录里应该有清晰位置，命名也应该保持一致。
+
+#### 3. 推荐目录结构
+
+```text
+WebAPI/
+├─ Controllers/
+│  └─ OrdersController.cs
+├─ Services/
+│  └─ OrderService.cs
+├─ Repositories/
+│  ├─ IOrderRepository.cs
+│  └─ InMemoryOrderRepository.cs
+├─ Dtos/
+│  ├─ Requests/
+│  │  ├─ OrderCreateRequest.cs
+│  │  └─ OrderQueryRequest.cs
+│  └─ Responses/
+│     └─ OrderResponse.cs
+├─ Domain/
+│  └─ OrderExceptions.cs
+├─ Program.cs
+├─ appsettings.json
+└─ WebAPI.csproj
+```
+
+**为什么这样分目录？**
+
+##### `Controllers/`
+
+放所有 API 入口类，例如：
+
+- `OrdersController`
+
+这里只处理：
+
+- 路由
+- 参数绑定
+- 调用 Service
+- 返回 HTTP 响应
+
+不放业务流程细节，不放数据存取代码。
+
+##### `Services/`
+
+放业务流程类，例如：
+
+- `OrderService`
+
+这里负责：
+
+- 业务动作编排（Create / Pay）
+- 业务规则判断
+- 抛业务异常
+
+不负责 HTTP 状态码，不直接关心路由。
+
+##### `Repositories/`
+
+放数据存取抽象与实现，例如：
+
+- `IOrderRepository`
+- `InMemoryOrderRepository`
+
+这里负责：
+
+- 查询
+- 新增
+- 更新
+
+不负责业务规则（例如“是否允许支付”）。
+
+##### `Dtos/Requests` 与 `Dtos/Responses`
+
+把接口输入输出分开存放：
+
+- `Requests/`：客户端传入的数据结构
+- `Responses/`：接口返回给客户端的数据结构
+
+你现在已经有：
+
+- `OrderCreateRequest`
+- `OrderQueryRequest`
+- `OrderResponse`
+
+这样分开之后，后面字段增多时不会混乱。
+
+##### `Domain/`
+
+放领域相关概念。你当前已经有：
+
+- `OrderExceptions.cs`
+
+后面如果继续扩展，还可能放：
+
+- `OrderStatus`（枚举）
+- `Order`（领域实体）
+- 领域规则相关类型
+
+这样可以避免把领域概念散落在 Controller / Service 中。
+
+#### 4. 命名约定：为什么要统一？
+
+结构解决的是“放哪里”，命名解决的是“看名字就知道它是什么”。
+
+如果命名不统一，文件再分目录也会乱。
+
+**当前项目可以采用的命名约定：**
+
+##### 1）Controller：`资源名 + Controller`
+
+- `OrdersController`
+
+表示一组订单相关接口入口。
+
+##### 2）Service：`资源名 + Service`
+
+- `OrderService`
+
+表示订单业务流程服务。
+
+##### 3）Repository
+
+- 接口：`IOrderRepository`
+- 实现：`InMemoryOrderRepository`
+
+规则很清晰：
+
+- 接口前缀 `I`
+- 实现类名字体现存储方式（`InMemory`）
+
+以后换数据库实现时很自然，例如（概念上）：
+
+- `EfOrderRepository`
+
+##### 4）Request DTO：`动作/用途 + Request`
+
+你当前已经用的是：
+
+- `OrderCreateRequest`
+- `OrderQueryRequest`
+
+看到名字就知道：
+
+- 是请求模型
+- 用于哪个场景（Create / Query）
+
+##### 5）Response DTO：`资源名 + Response`
+
+- `OrderResponse`
+
+表示接口返回的订单结构。
+
+##### 6）异步方法名：加 `Async`
+
+- `GetAllAsync`
+- `GetByIdAsync`
+- `CreateAsync`
+- `PayAsync`
+
+#### 5. 补全API功能
+
+在统一规则的结构和文件命名前提下，对api的CRUD功能里的更新和删除功能补全
+
+- 删除 order
+
+    删除一个order，并不是销毁，而是从数据列表中移除
+
+- 更新 order
+
+    更新一个order，可以修改订单的属性，一般id不能改
+
+- 代码实现
+
+    ```c#
+    public interface IOrderRepository
+    {
+        ...
+        Task<int> DeleteAsync(int id, CancellationToken cancellationToken);
+        Task<Order?> UpdateAsync(Order order, CancellationToken cancellationToken);
+    }
+    ```
+
+    ```c#
+    public class InMemoryOrderRepository : IOrderRepository
+    {
+       ...
+    
+        public Task<int> DeleteAsync(int id, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var order = Orders.FirstOrDefault(x => x.Id == id);
+            if (order != null)
+            {
+                Orders.Remove(order);
+            }
+            return Task.FromResult(id);
+        }
+    
+        public Task<Order?> UpdateAsync(Order newOrder, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var order = Orders.FirstOrDefault(x => x.Id == newOrder.Id);
+            if (order != null)
+            {
+                order.Amount= newOrder.Amount;
+                order.Status=  newOrder.Status;
+            }
+            return Task.FromResult(order);
+        }
+    }
+    ```
+
+    ```c#
+    public class OrderUpdateQueryRequest
+    {
+        public decimal Amount { get; set; }
+        public string Status { get; set; }="Created";
+    }
+    ```
+
+    ```c#
+    public class OrderService(IOrderRepository repo)
+    {
+        ...
+        public async Task<int > DeleteAsync(int id, CancellationToken cancellationToken)
+        {
+            var order = await repo.GetByIdAsync(id, cancellationToken);
+            if (order is null)
+                throw new OrderNotFoundException(id);
+            await repo.DeleteAsync(order.Id, cancellationToken);
+            return order.Id;
+        }
+    
+        public async Task<Order> UpdateAsync(int id, OrderUpdateQueryRequest query, CancellationToken cancellationToken)
+        {
+            var order = await repo.GetByIdAsync(id, cancellationToken);
+            if (order is null)
+                throw new OrderNotFoundException(id);
+            order.Amount = query.Amount;
+            order.Status = query.Status;
+            return order;
+        }
+    }
+    ```
+
+    ```c#
+    [ApiController]
+    [Route("[controller]")]
+    public class OrdersController(OrderService service) : ControllerBase
+    {
+        ...
+    
+        [HttpDelete("{id:int}")]
+        public async Task<ActionResult<int>> Delete(int id, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await service.DeleteAsync(id, cancellationToken);
+                return Ok(new { Message = $"order {id} is deleted。" });
+            }
+            catch (OrderNotFoundException)
+            {
+                return NotFound();
+            }
+        }
+    
+        [HttpPut("{id:int}")]
+        public async Task<ActionResult<Order>> Update(int id, OrderUpdateQueryRequest query,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                var order = await service.UpdateAsync(id, query, cancellationToken);
+                return Ok(ToResponse(order));
+            }
+            catch (OrderNotFoundException)
+            {
+    
+                return NotFound();
+            }
+        }
+    	...
+    }
+    ```
+
+    
+
+#### 6. 小结
+
+到这里，完成了Controller Web API（基础版）
+
+- 从项目启动到 Controller
+- 从路由到 DTO
+- 从状态码到验证
+- 从异常到分层
+- 从 DI 到 async/cancellation
+- 从列表查询到项目结构
+
+后面继续推进进阶内容方向（数据库、认证、日志、中间件等）。
+
+
+

@@ -99,4 +99,23 @@ public class OrderService(IOrderRepository repo)
         await repo.UpdateStatusAsync(id, "Paid", cancellationToken);
         return order;
     }
+    
+    public async Task<int > DeleteAsync(int id, CancellationToken cancellationToken)
+    {
+        var order = await repo.GetByIdAsync(id, cancellationToken);
+        if (order is null)
+            throw new OrderNotFoundException(id);
+        await repo.DeleteAsync(order.Id, cancellationToken);
+        return order.Id;
+    }
+
+    public async Task<Order> UpdateAsync(int id, OrderUpdateQueryRequest query, CancellationToken cancellationToken)
+    {
+        var order = await repo.GetByIdAsync(id, cancellationToken);
+        if (order is null)
+            throw new OrderNotFoundException(id);
+        order.Amount = query.Amount;
+        order.Status = query.Status;
+        return order;
+    }
 }
