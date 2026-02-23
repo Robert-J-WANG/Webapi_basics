@@ -10,9 +10,10 @@ namespace WebAPI_Basics.Controllers;
 public class OrdersController(OrderService service) : ControllerBase
 {
     [HttpGet]
-    public async Task<ActionResult<List<OrderResponse>>> GetAll(CancellationToken cancellationToken)
+    public async Task<ActionResult<List<OrderResponse>>> GetAll([FromQuery] OrderQueryRequest query,
+        CancellationToken cancellationToken)
     {
-        var result = (await service.GetAllAsync(cancellationToken)).Select(ToResponse).ToList();
+        var result = (await service.GetAllAsync(query, cancellationToken)).Select(ToResponse).ToList();
         return Ok(result);
     }
 
@@ -31,7 +32,8 @@ public class OrdersController(OrderService service) : ControllerBase
     }
 
     [HttpPost]
-    public async Task<ActionResult<OrderResponse>> Create(OrderCreateRequest request,CancellationToken cancellationToken)
+    public async Task<ActionResult<OrderResponse>> Create(OrderCreateRequest request,
+        CancellationToken cancellationToken)
     {
         var order = await service.CreateAsync(request, cancellationToken);
         var response = ToResponse(order);
@@ -48,7 +50,7 @@ public class OrdersController(OrderService service) : ControllerBase
     {
         try
         {
-            var order = await service.PayAsync(id,cancellationToken);
+            var order = await service.PayAsync(id, cancellationToken);
             return Ok(ToResponse(order));
         }
         catch (OrderNotFoundException)

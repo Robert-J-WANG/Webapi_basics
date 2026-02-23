@@ -2877,3 +2877,328 @@ builder.Services.AddScoped<IOrderRepository, InMemoryOrderRepository>();
 
 因此，还需要处理：**Query 参数：过滤 / 排序 / 分页**。
 
+### 13. Query 参数
+
+#### 1. 要解决什么问题？
+
+给 `GET /orders` 加上过滤 / 排序 / 分页。
+
+现在的API 已经能完成基础查询、创建和支付动作，但 `GET /orders` 还有一个明显问题：
+
+它现在只能“全部返回”。
+
+这在数据很少时没问题，但一旦订单变多，就会出现几个实际需求：
+
+- 只看已支付订单（过滤）
+- 按金额排序（排序）
+- 一次只看一页（分页）
+
+这一章要解决的是：**让 `GET /orders` 接收查询参数（Query String），并在服务层中完成基础过滤 / 排序 / 分页**。
+
+#### 2. 什么是 Query 参数？它和路由参数有什么区别？
+
+前面已经用过路由参数：
+
+- `GET /orders/1`（`id` 在路径里）
+
+Query 参数，写在 `?` 后面，例如：
+
+- `GET /orders?status=Paid`
+- `GET /orders?sortBy=amount&sortDir=desc`
+- `GET /orders?page=1&pageSize=20`
+
+**区别可以这样理解**：
+
+- **路由参数**：定位“哪一个资源”（例如哪个订单 id）
+- **Query 参数**：描述“如何查询列表”（筛选、排序、分页）
+
+所以 `GET /orders` 的查询能力，天然适合放在 Query 参数里。
+
+#### 3. 如何操作
+
+这章做三件事：
+
+1. 定义一个查询 DTO：`OrderQueryRequest`（接收 query 参数）
+2. 修改 `OrdersController.GetAll(...)`：从 Query 接收条件
+3. 修改 `OrderService.GetAllAsync(...)`：用 LINQ 做过滤 / 排序 / 分页
+
+Repository 暂时不改（仍然返回全部数据给 Service 处理）。
+
+#### 4. 代码实现
+
+1. 新增查询 DTO（接收 Query 参数）
+
+    新建文件：`Dtos/Requests/OrderQueryRequest.cs`
+
+    ```c#
+    public class OrderQueryRequest
+    {
+        public string? Status { get; set; }
+    
+        public string? SortBy { get; set; }   // amount / id
+        public string? SortDir { get; set; }  // asc / desc
+    
+        public int Page { get; set; } = 1;
+        public int PageSize { get; set; } = 20;
+    }
+    ```
+
+    **为什么要用 DTO 接收 Query？**
+
+    因为查询条件很快就会变多。
+
+    如果全写在 Action 参数里，会变成这样：
+
+    ```c#
+    GetAll(string? status, string? sortBy, string? sortDir, int page = 1, int pageSize = 20, CancellationToken ct = default)
+    ```
+
+    参数一多，接口签名会越来越乱。
+
+    用 `OrderQueryRequest` 的好处是：
+
+    - 查询条件集中在一个对象里
+    - 后面扩展字段更方便
+    - 和你前面“输入 DTO”的思路一致
+
+2. 修改 `OrdersController.GetAll(...)`，从 Query 接收参数
+
+    文件：`Controllers/OrdersController.cs`
+
+    在上一版本基础上，**只修改 `GetAll` 这个 Action**：
+
+    - 增加 `OrderQueryRequest query`
+    - 用 `[FromQuery]` 明确告诉框架从 Query String 绑定
+    - 调用 `service.GetAllAsync(query, cancellationToken)`， 把query对象传给service
+
+    ```c#
+    [HttpGet]
+        public async Task<ActionResult<List<OrderResponse>>> GetAll([FromQuery] OrderQueryRequest query,
+            CancellationToken cancellationToken)
+        {
+            var result = (await service.GetAllAsync(query, cancellationToken)).Select(ToResponse).ToList();
+            return Ok(result);
+        }
+    ```
+
+    **这里发生了什么？**
+
+    当客户端请求：
+
+    - `GET /orders?status=Paid&page=1&pageSize=10`
+
+    框架会自动把 Query 参数绑定到 `OrderQueryRequest`：
+
+    - `query.Status == "Paid"`
+    - `query.Page == 1`
+    - `query.PageSize == 10`
+
+    这就是 Query 参数的模型绑定。
+
+3. 修改 `OrderService.GetAllAsync(...)`，用 LINQ 实现查询能力
+
+    文件：`Services/OrderService.cs`
+
+    ```c#
+    public class OrderService(IOrderRepository repo)
+    {
+        public async Task<List<Order>> GetAllAsync(OrderQueryRequest query, CancellationToken cancellationToken)
+        {
+            var orders = await repo.GetAllAsync(cancellationToken);
+            
+            // 根据query参数，对数据集处理
+            // 1) 过滤（status）
+            if (!string.IsNullOrWhiteSpace(query.Status))
+            {
+                orders = orders.Where(o => string.Equals(o.Status, query.Status, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+            }
+    
+            // 2) 排序（sortBy + sortDir）
+            var sortBy = query.SortBy?.Trim().ToLowerInvariant();
+            var sortDir = query.SortDir?.Trim().ToLowerInvariant();
+    
+            var desc = sortDir == "desc";
+    
+            // switch语句 (新语法)
+            orders = sortBy switch
+            {
+                "amount" => desc
+                    ? orders.OrderByDescending(x => x.Amount).ToList()
+                    : orders.OrderBy(x => x.Amount).ToList(),
+    
+                "id" => desc
+                    ? orders.OrderByDescending(x => x.Id).ToList()
+                    : orders.OrderBy(x => x.Id).ToList(),
+    
+                _ => orders.OrderBy(x => x.Id).ToList() // 默认按 Id 升序
+            };
+    
+            // 还原后的老式写法（语句块）
+            /*
+            switch (sortBy)
+            {
+                case "amount":
+                    if (desc)
+                    {
+                        orders = orders.OrderByDescending(x => x.Amount).ToList();
+                    }
+                    else
+                    {
+                        orders = orders.OrderBy(x => x.Amount).ToList();
+                    }
+                    break;
+    
+                case "id":
+                    if (desc)
+                    {
+                        orders = orders.OrderByDescending(x => x.Id).ToList();
+                    }
+                    else
+                    {
+                        orders = orders.OrderBy(x => x.Id).ToList();
+                    }
+                    break;
+    
+                default:
+                    orders = orders.OrderBy(x => x.Id).ToList(); // 默认按 Id 升序
+                    break;
+            }
+            */
+    
+            // 3) 分页（page + pageSize）
+            var page = query.Page < 1 ? 1 : query.Page;
+            var pageSize = query.PageSize < 1 ? 20 : query.PageSize;
+            pageSize = Math.Min(pageSize, 100); // 基础保护，避免一次拿太多
+    
+            orders = orders
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .ToList();
+            
+            return orders;
+        }
+        ....
+    }        
+    ```
+
+    **这里的 LINQ 逻辑是怎么串起来的？**
+
+    1. 先拿全部数据
+
+        ```csharp
+        var items = await _repo.GetAllAsync(cancellationToken);
+        ```
+
+        Repository 仍然只负责“取数据”，查询规则由 Service 负责。
+
+    2. 过滤（Where）
+
+        如果传了 `status`，就按状态筛选：
+
+        - `status=Paid`
+        - `status=Created`
+
+        使用 `StringComparison.OrdinalIgnoreCase`，这样大小写不敏感（`paid` / `PAID` 也能匹配）。
+
+    3. 排序（OrderBy / OrderByDescending）
+
+        通过 `sortBy` + `sortDir` 控制排序：
+
+        - `sortBy=amount&sortDir=desc`
+        - `sortBy=id&sortDir=asc`
+
+        如果没传或传了不支持的字段，默认按 `Id` 升序。
+
+    4. 分页（Skip / Take）
+
+        通过：
+
+        - `page`
+        - `pageSize`
+
+        把结果切成一页一页：
+
+        - `Skip((page - 1) * pageSize)`
+        - `Take(pageSize)`
+
+        并做了基础保护：
+
+        - `page < 1` → 视为 `1`
+        - `pageSize < 1` → 用默认值 `20`
+        - `pageSize > 100` → 限制为 `100`
+
+    
+
+#### 5. 用 Scalar 测试
+
+1. 不带参数（默认行为）
+
+    `GET /orders`
+
+    预期：
+
+    - 仍然返回列表
+    - 默认按 `Id` 升序
+    - 默认分页（第1页，20条；你当前数据量很小，看起来和以前一样）
+
+2. 按状态过滤
+
+    - `GET /orders?status=Paid`
+
+    预期：
+
+    - 只返回 `Paid` 状态订单
+
+3. 按金额降序排序
+
+    - `GET /orders?sortBy=amount&sortDir=desc`
+
+    预期：
+
+    - 金额高的在前面
+
+4. 分页参数
+
+    - `GET /orders?page=1&pageSize=1`
+    - `GET /orders?page=2&pageSize=1`
+
+    预期：
+
+    - 每页只返回 1 条
+    - 第1页和第2页结果不同
+
+5. 组合查询（最接近真实用法）
+
+    - `GET /orders?status=Paid&sortBy=amount&sortDir=desc&page=1&pageSize=10`
+
+    预期：
+
+    - 先过滤，再排序，再分页
+
+#### 6. 小结
+
+让列表接口具备了基础查询能力：
+
+- **过滤**（Where）
+- **排序**（OrderBy / OrderByDescending）
+- **分页**（Skip / Take）
+- **Query 参数模型绑定**（`[FromQuery]` + DTO）
+
+这一步非常重要，因为真实项目里列表接口几乎都会有类似需求。
+
+**新的问题来了？**
+
+现在功能已经比较完整，但随着内容增多，文件会越来越多：
+
+- Controller
+- Service
+- Repository
+- Dtos/Requests
+- Dtos/Responses
+- Domain
+
+如果没有统一结构和命名约定，项目会很快变乱。
+
+因此，需要对项目结构与命名的约定。
+
