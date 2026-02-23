@@ -64,36 +64,6 @@ public class OrdersController(OrderService service) : ControllerBase
         }
     }
 
-    [HttpDelete("{id:int}")]
-    public async Task<ActionResult<int>> Delete(int id, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await service.DeleteAsync(id, cancellationToken);
-            return Ok(new { Message = $"order {id} is deleted。" });
-        }
-        catch (OrderNotFoundException)
-        {
-            return NotFound();
-        }
-    }
-
-    [HttpPut("{id:int}")]
-    public async Task<ActionResult<Order>> Update(int id, OrderUpdateQueryRequest query,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            var order = await service.UpdateAsync(id, query, cancellationToken);
-            return Ok(ToResponse(order));
-        }
-        catch (OrderNotFoundException)
-        {
-
-            return NotFound();
-        }
-    }
-
 
     //辅助方法： 把OrderItem转换成OrderResponse
     private OrderResponse ToResponse(Order order)

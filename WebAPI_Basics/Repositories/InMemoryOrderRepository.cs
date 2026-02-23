@@ -60,27 +60,4 @@ public class InMemoryOrderRepository : IOrderRepository
 
         return Task.CompletedTask;
     }
-
-    public Task<int> DeleteAsync(int id, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var order = Orders.FirstOrDefault(x => x.Id == id);
-        if (order != null)
-        {
-            Orders.Remove(order);
-        }
-        return Task.FromResult(id);
-    }
-
-    public Task<Order?> UpdateAsync(Order newOrder, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var order = Orders.FirstOrDefault(x => x.Id == newOrder.Id);
-        if (order != null)
-        {
-            order.Amount= newOrder.Amount;
-            order.Status=  newOrder.Status;
-        }
-        return Task.FromResult(order);
-    }
 }
