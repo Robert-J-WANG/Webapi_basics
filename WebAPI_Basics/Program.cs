@@ -1,3 +1,5 @@
+using WebAPI_Basics.Services;
+
 namespace WebAPI_Basics;
 
 using Scalar.AspNetCore;
@@ -15,6 +17,9 @@ public class Program
         
         // 将基于 Controller 的 MVC 架构服务添加到 DI 容器中，启用 Action 激活、模型绑定及验证等核心功能。
         builder.Services.AddControllers();
+        
+        // 注册我们自己的类型模型依赖
+        builder.Services.AddScoped<OrderService>();
         
         // 注册 Microsoft.AspNetCore.OpenApi 服务，利用 .NET 9 原生的元数据提取技术生成 OpenAPI 3.1 规范文档。
         builder.Services.AddOpenApi(); 

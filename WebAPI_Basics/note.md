@@ -748,14 +748,14 @@ public class OrdersController : ControllerBase
     ...
 
     [HttpGet]
-    public ActionResult GetAll()
+    public ActionResult<OrderResponse> GetAll()
     {
         var result = Orders.Select(ToResponse).ToList();
         return Ok(result);
     }
 
     [HttpGet("{id:int}")]
-    public ActionResult GetById(int id)
+    public ActionResult<OrderResponse> GetById(int id)
     {
         var order = Orders.FirstOrDefault(x => x.Id == id);
         if (order == null)
@@ -767,7 +767,7 @@ public class OrdersController : ControllerBase
     }
 
     [HttpPost]
-    public ActionResult Create(OrderCreateRequest request)
+    public ActionResult<OrderResponse> Create(OrderCreateRequest request)
     {
         if (request.Amount <= 0)
         {
@@ -956,7 +956,7 @@ public class OrdersController : ControllerBase
 
     ```c#
     [HttpPost]
-    public ActionResult Create(OrderCreateRequest request)
+    public ActionResult<OrderResponse> Create(OrderCreateRequest request)
     {
         var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
         var order = new OrderItem(nextId, request.Amount, "Created");
@@ -1237,3 +1237,300 @@ if (order is null)
 - 后面动作一多，会越来越难维护
 
 因此，我们需要把“HTTP 接口层”和“业务流程层”分开。
+
+### 7. 引入service（业务）层
+
+#### 1. 解决什么问题？
+
+第6章我们已经完成了 `Pay` 动作，并且能把业务错误映射成正确的 HTTP 响应（`404 / 409`）。
+
+功能上是对的，但代码结构开始出现一个明显问题：
+
+`OrdersController` 里同时在做很多事情：
+
+- 接收 HTTP 请求（路由、参数、返回状态码）
+- 查找订单
+- 判断业务规则（是否已支付）
+- 修改订单状态
+
+这会让 Controller 越来越厚。接口一多（创建、查询、支付、取消、退款……），Controller 很快就会变成“什么都写”的地方。
+
+因此，我们需要 **把“HTTP 接口处理”和“业务流程处理”分开**。
+
+#### 2. 为什么要引入 Service 层？
+
+因为 Controller 和业务流程关注点不同。
+
+**Controller 关注的是 HTTP**
+
+- 路由是什么
+- 参数怎么进来
+- 返回 200 / 404 / 409 哪个状态码
+
+**Service 关注的是业务流程**
+
+以 `Pay` 为例，它关心的是：
+
+- 查订单
+- 判断是否允许支付
+- 修改状态
+- 返回处理结果（或抛出业务异常）
+
+也就是说，Service 负责的是“这件事怎么做完”，而不是“HTTP 怎么表达”。
+
+这样拆开之后，代码会更清晰：
+
+- Controller 变薄（只做接口层工作）
+- 业务逻辑集中（以后更容易复用和维护）
+
+#### 3. 如何操作？
+
+这一章我们只做结构调整，不改变已经实现的业务行为。
+
+目标是把 `Pay` 的业务流程从 `OrdersController` 挪到 `OrderService`：
+
+- `Controller` 仍然负责 `try/catch` 和返回 `404 / 409`
+- `Service` 负责查订单、判断状态、修改状态、抛业务异常
+
+这样第6章学到的“业务异常映射 HTTP”会保留，而且会变得更自然。
+
+#### 4. 代码实现
+
+- 新建 `OrderService`
+
+    新建文件夹和文件：`Services/OrderService.cs`
+
+    ```c#
+    public class OrderService
+    {
+        public class OrderItem
+        {
+            public int Id { get; set; }
+            public decimal Amount { get; set; }
+            public string Status { get; set; } = string.Empty;
+        }
+    
+        private static readonly List<OrderItem> Orders =
+        [
+            new OrderItem
+            {
+                Id = 1,
+                Amount = 100m,
+                Status = "Created"
+            },
+            new OrderItem
+            {
+                Id = 2,
+                Amount = 200m,
+                Status = "Paid"
+            }
+        ];
+    
+        public List<OrderItem> GetAll()
+        {
+            return Orders.ToList();
+        }
+    
+        public OrderItem GetById(int id)
+        {
+            var order = Orders.FirstOrDefault(o => o.Id == id);
+            if (order is null)
+                throw new OrderNotFoundException(id);
+            return order;
+        }
+    
+        public OrderItem Create(OrderCreateRequest request)
+        {
+            var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
+            var order = new OrderItem()
+            {
+                Id = nextId,
+                Amount = request.Amount,
+                Status = "Created"
+            };
+            Orders.Add(order);
+            return order;
+        }
+    
+        public OrderItem Pay(int id)
+        {
+            var order = Orders.FirstOrDefault(x => x.Id == id);
+            if (order is null)
+                throw new OrderNotFoundException(id);
+            if (order.Status == "Paid")
+                throw new OrderConflictException($"Order {id} was already paid");
+            order.Status = "Paid";
+            return order;
+        }
+    }
+    ```
+
+    `OrderService` 现在负责四个业务动作：
+
+    - `GetAll()`
+    - `GetById(id)`
+    - `Create(request)`
+    - `Pay(id)`
+
+    其中最关键的是 `Pay(id)`：
+
+    - 查订单
+    - 判断是否已支付
+    - 修改状态
+    - 抛业务异常（如果失败）
+
+    这就是业务流程层的职责。
+
+- 在 `Program.cs` 注册 Service（交给框架创建）
+
+    Controller 里要使用 `OrderService`，就要先注册到依赖注入容器。
+
+    在 `Program.cs` 里，`builder.Build();` 之前加入这一行：
+
+    ```c#
+    builder.Services.AddScoped<WebAPI.Services.OrderService>();
+    ```
+
+    **为什么要注册？**
+
+    因为接下来我们会在 `OrdersController` 构造函数里写：
+
+    ```c#
+    public OrdersController(OrderService service)
+    ```
+
+    框架要想自动创建这个 Controller，就必须知道 `OrderService` 怎么创建。
+
+    这就是依赖注入（DI）在 ASP.NET Core 里的落地方式。
+
+- 修改 `OrdersController`，让它调用 Service
+
+    在第6章的 `OrdersController` 基础上做修改：
+
+    - 删除 Controller 里的 `OrderItem` 和 `Orders` 列表（这些移到 Service 了）
+    - 增加构造函数注入 `OrderService`
+    - 各个 Action 改为调用 `_service`
+
+    文件：`Controllers/OrdersController.cs`
+
+    ```c#
+    [ApiController]
+    [Route("[controller]")]
+    public class OrdersController(OrderService service) : ControllerBase
+    {
+        [HttpGet]
+        public ActionResult<List<OrderResponse>> GetAll()
+        {
+            var result = service.GetAll().Select(ToResponse).ToList();
+            return Ok(result);
+        }
+    
+        [HttpGet("{id:int}")]
+        public ActionResult<OrderResponse> GetById(int id)
+        {
+            try
+            {
+                var order = service.GetById(id);
+                return Ok(ToResponse(order));
+            }
+            catch (OrderNotFoundException)
+            {
+                return NotFound();
+            }
+        }
+    
+        [HttpPost]
+        public ActionResult<OrderResponse> Create(OrderCreateRequest request)
+        {
+            var order = service.Create(request);
+            var response = ToResponse(order);
+    
+            return CreatedAtAction(
+                nameof(GetById),
+                new { id = response.Id },
+                response
+            );
+        }
+    
+        [HttpPost("{id:int}/pay")]
+        public ActionResult<OrderResponse> Pay(int id)
+        {
+            try
+            {
+                var order = service.Pay(id);
+                return Ok(ToResponse(order));
+            }
+            catch (OrderNotFoundException)
+            {
+                return NotFound();
+            }
+            catch (OrderConflictException ex)
+            {
+                return Conflict(new { message = ex.Message });
+            }
+        }
+    
+    
+        //辅助方法： 把OrderItem转换成OrderResponse
+        private OrderResponse ToResponse(OrderService.OrderItem order)
+        {
+            return new OrderResponse
+            {
+                Id = order.Id,
+                Amount = order.Amount,
+                Status = order.Status,
+            };
+        }
+    }
+    ```
+
+    
+
+- 代码结构发生了什么变化？
+
+    **Controller 变薄了**
+
+    它现在主要做的是：
+
+    - 接收请求参数
+    - 调用 `service`
+    - 把结果转成 `OrderResponse`
+    - 把异常映射成 `404 / 409`
+
+    **Service 集中了业务流程**
+
+    Controller 不再直接操作订单列表，也不再写支付规则判断。
+     这些都集中到了 `OrderService` 中。
+
+    这就是“分层”的第一步。
+
+#### 5. 用 Scalar 测试
+
+接口行为第6章保持一致：
+
+- `GET /orders` → 200
+- `GET /orders/{id}` → 存在返回 200，不存在返回 404
+- `POST /orders`（合法）→ 201
+- `POST /orders`（非法 amount）→ 400（仍由 `[ApiController]` + DTO 验证处理）
+- `POST /orders/{id}/pay` → 成功 200；不存在 404；重复支付 409
+
+#### 6. 小结
+
+本章完成了一个非常关键的结构升级：
+
+- **Controller**：负责 HTTP 接口层
+- **Service**：负责业务流程层
+
+这会让后面的代码更容易扩展，也为进一步拆分“数据访问”做准备。
+
+**新的问题来了？**
+
+现在虽然业务流程已经从 Controller 移到了 Service，但是：
+
+- 当前阶段 `OrderService` 内部使用嵌套类型 `OrderItem`
+- `OrdersController` 使用辅助方法 `ToResponse(OrderService.OrderItem order)` 做 DTO 映射时，耦合了这个类型。
+
+ `OrderItem` 已经被 Controller 使用，说明它不再只是 Service 内部细节。
+
+**因此， 需要先把订单模型从 Service 内部独立出来，理顺跨层数据传递边界。**
+
