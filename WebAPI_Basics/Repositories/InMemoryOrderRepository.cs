@@ -20,11 +20,11 @@ public class InMemoryOrderRepository : IOrderRepository
         }
     ];
 
-    public List<Order> GetAll() => Orders.ToList();
+    public Task<List<Order>> GetAllAsync() => Task.FromResult(Orders.ToList());
 
-    public Order? GetById(int id) => Orders.FirstOrDefault(x => x.Id == id);
+    public Task<Order?> GetByIdAsync(int id) => Task.FromResult(Orders.FirstOrDefault(x => x.Id == id));
 
-    public Order Add(decimal amount)
+    public Task<Order> AddAsync(decimal amount)
     {
         var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
         var order = new Order()
@@ -34,14 +34,16 @@ public class InMemoryOrderRepository : IOrderRepository
             Status = "Created"
         };
         Orders.Add(order);
-        return order;
+        return Task.FromResult(order);
     }
 
-    public void UpdateStatus(int id, string status)
+    public Task UpdateStatusAsync(int id, string status)
     {
         var order = Orders.FirstOrDefault(x => x.Id == id);
-        if (order is null)
-            return;
-        order.Status = status;
+        if (order != null)
+        {
+            order.Status = status;
+        }
+        return Task.CompletedTask;
     }
 }

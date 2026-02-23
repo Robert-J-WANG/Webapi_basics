@@ -4,8 +4,8 @@ namespace WebAPI_Basics.Repositories;
 
 public interface IOrderRepository
 {
-    List<Order> GetAll();
-    Order? GetById(int id);
-    Order Add(decimal amount);
-    void UpdateStatus(int id, string status);
+    Task<List<Order>> GetAllAsync();
+    Task<Order?> GetByIdAsync(int id);
+    Task<Order> AddAsync(decimal amount);
+    Task UpdateStatusAsync(int id, string status);
 }

@@ -2236,3 +2236,306 @@ builder.Services.AddScoped<IOrderRepository, InMemoryOrderRepository>();
 
 这就需要**Async Web API：把同步接口改成 `async` + `Task`**。
 
+
+
+### 10. Async Web API
+
+#### 1. 要解决什么问题？
+
+前面几章我们已经把结构搭起来了：
+
+- Controller 负责 HTTP
+- Service 负责业务流程
+- Repository 负责数据存取
+- DI 负责对象创建与注入
+
+但目前所有方法还是同步写法，例如：
+
+- `GetById(...)`
+- `Create(...)`
+- `Pay(...)`
+
+现在用内存列表时问题不明显，因为内存操作很快，也不是 IO。
+
+但真实项目里常见的是：
+
+- 查数据库
+- 调第三方接口
+- 发网络请求
+
+这些都是 **IO 操作**。如果还用同步写法，会在等待期间占着线程，影响并发处理能力。
+
+这一章要解决的是：**把当前接口改成异步写法，建立 Web API 的 async/await 基本结构**。
+
+#### 2. 为什么要改成异步？
+
+- 同步写法的问题（在真实 IO 场景）
+    - 同步方法在等待数据库/网络返回时，会一直占着当前线程。
+    - 请求多了之后，线程资源会更紧张，吞吐会变差。
+- 异步写法的作用
+    - 异步不是“让代码更快执行”，而是让线程在等待 IO 时可以先去处理别的请求。
+    - 这样整体并发能力更好。
+
+所以这章的重点不是性能测试，而是先把结构改对：
+
+- 方法签名改为 `Task` / `Task<T>`
+- Controller 使用 `async/await`
+- Service / Repository 也同步升级为异步版本
+
+#### 3. 如何操作？
+
+这章只做一类改动：**把同步方法签名和调用链改成异步**，业务行为保持不变。
+
+改动顺序按调用链走最清楚：
+
+1. Repository 接口改成异步
+2. InMemory Repository 实现改成异步
+3. Service 改成异步
+4. Controller 改成异步
+5. 行为验证（接口结果应保持不变）
+
+#### 4. 代码实现
+
+- 修改 `IOrderRepository`（异步签名）
+
+    文件：`Repositories/IOrderRepository.cs`
+
+    把同步方法改成 `Task` / `Task<T>`：
+
+    ```c#
+    public interface IOrderRepository
+    {
+        Task<List<Order>> GetAllAsync();
+        Task<Order?> GetByIdAsync(int id);
+        Task<Order> AddAsync(decimal amount);
+        Task UpdateStatusAsync(int id, string status);
+    }
+    ```
+
+    这里发生了什么变化？
+
+    - 原来的 `GetAll()` → `GetAllAsync()`
+    - 返回值从 `T` 变成 `Task<T>`
+    - 无返回值方法从 `void` 变成 `Task`
+
+​	命名上加 `Async` 是常见约定，方便一眼识别异步方法。
+
+- 修改 `InMemoryOrderRepository`（实现异步接口）
+
+    文件：`Repositories/InMemoryOrderRepository.cs`
+
+    当前还是内存操作，没有真实 IO，所以这里的“异步”主要是为了建立统一接口形态。
+
+    实现上可以用 `Task.FromResult(...)` 和 `Task.CompletedTask`。
+
+    ```c#
+    public class InMemoryOrderRepository : IOrderRepository
+    {
+        private static readonly List<Order> Orders =
+        [
+            new Order
+            {
+                Id = 1,
+                Amount = 100m,
+                Status = "Created"
+            },
+            new Order
+            {
+                Id = 2,
+                Amount = 200m,
+                Status = "Paid"
+            }
+        ];
+    
+        public Task<List<Order>> GetAllAsync() => Task.FromResult(Orders.ToList());
+    
+        public Task<Order?> GetByIdAsync(int id) => Task.FromResult(Orders.FirstOrDefault(x => x.Id == id));
+    
+        public Task<Order> AddAsync(decimal amount)
+        {
+            var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
+            var order = new Order()
+            {
+                Id = nextId,
+                Amount = amount,
+                Status = "Created"
+            };
+            Orders.Add(order);
+            return Task.FromResult(order);
+        }
+    
+        public Task UpdateStatusAsync(int id, string status)
+        {
+            var order = Orders.FirstOrDefault(x => x.Id == id);
+            if (order != null)
+            {
+                order.Status = status;
+            }
+            return Task.CompletedTask;
+        }
+    }
+    ```
+
+    **为什么这里没有 `await`？**
+
+    - 因为当前实现是内存操作，没有真正的异步 IO。
+    - 这一层改成异步签名，是为了让调用链（Service → Controller）形成统一模式，后面换数据库时更自然。
+    - 也就是说，这章是在建立“异步接口形态”，不是假装内存操作变快。
+
+- 修改 `OrderService`（异步化业务流程）
+
+    文件：`Services/OrderService.cs`
+
+    把方法改成 `Task` / `Task<T>`，并在调用 Repository 时使用 `await`。
+
+    ```c#
+    public class OrderService(IOrderRepository repo)
+    {
+        public async Task<List<Order>> GetAllAsync() => await repo.GetAllAsync();
+    
+        public async Task<Order> GetByIdAsync(int id) => await repo.GetByIdAsync(id) ?? throw new OrderNotFoundException(id);
+    
+        public async Task<Order> CreateAsync(OrderCreateRequest request) => await repo.AddAsync(request.Amount);
+    
+        public async Task<Order> PayAsync(int id)
+        {
+            var order = await repo.GetByIdAsync(id);
+            if (order is null)
+                throw new OrderNotFoundException(id);
+            if (order.Status == "Paid")
+                throw new OrderConflictException($"Order {id} was already paid");
+            await repo.UpdateStatusAsync(id, "Paid");
+            return order;
+        }
+    }
+    ```
+
+    **这里要注意什么？**
+
+    业务逻辑没有变化，变化的是“等待方式”：
+
+    - 原来直接调用 `_repo.GetById(...)`
+    - 现在改成 `await _repo.GetByIdAsync(...)`
+
+    这说明异步改造的目标是**调用链形态升级**，不是改业务规则。
+
+    
+
+- 修改 `OrdersController`（Action 改成 async）
+
+    文件：`Controllers/OrdersController.cs`
+
+    在上个版本基础上，把四个 Action 改成异步写法，并调用 `service.*Async(...)`。
+
+    ```c#
+    [ApiController]
+    [Route("[controller]")]
+    public class OrdersController(OrderService service) : ControllerBase
+    {
+        [HttpGet]
+        public async Task<ActionResult<List<OrderResponse>>> GetAll()
+        {
+            var result = (await service.GetAllAsync()).Select(ToResponse).ToList();
+            return Ok(result);
+        }
+    
+        [HttpGet("{id:int}")]
+        public async Task<ActionResult<OrderResponse>> GetById(int id)
+        {
+            try
+            {
+                var order = await service.GetByIdAsync(id);
+                return Ok(ToResponse(order));
+            }
+            catch (OrderNotFoundException)
+            {
+                return NotFound();
+            }
+        }
+    
+        [HttpPost]
+        public async Task<ActionResult<OrderResponse>> Create(OrderCreateRequest request)
+        {
+            var order = await service.CreateAsync(request);
+            var response = ToResponse(order);
+    
+            return CreatedAtAction(
+                nameof(GetById),
+                new { id = response.Id },
+                response
+            );
+        }
+    
+        [HttpPost("{id:int}/pay")]
+        public async Task<ActionResult<OrderResponse>> Pay(int id)
+        {
+            try
+            {
+                var order = await service.PayAsync(id);
+                return Ok(ToResponse(order));
+            }
+            catch (OrderNotFoundException)
+            {
+                return NotFound();
+            }
+            catch (OrderConflictException ex)
+            {
+                return Conflict(new { message = ex.Message });
+            }
+        }
+    
+    
+        //辅助方法： 把OrderItem转换成OrderResponse
+        private OrderResponse ToResponse(Order order)
+        {
+            return new OrderResponse
+            {
+                Id = order.Id,
+                Amount = order.Amount,
+                Status = order.Status,
+            };
+        }
+    }
+    ```
+
+**关键变化是什么？**
+
+1. Action 返回类型变成 `Task<...>`
+
+    例如：`ActionResult<OrderResponse>` → `Task<ActionResult<OrderResponse>>`
+
+    因为 Action 内部要 `await` 异步操作。
+
+2. Service / Repository 方法名加 `Async`
+
+    这是异步方法命名约定，能让调用链更清晰。
+
+3. 业务行为不变，结构形态升级
+
+#### 5. 用 Scalar 测试
+
+接口行为应与上一章一致：
+
+- `GET /orders` → 200
+- `GET /orders/{id}` → 存在 200，不存在 404
+- `POST /orders`（合法）→ 201
+- `POST /orders`（非法 amount）→ 400
+- `POST /orders/{id}/pay` → 成功 200；不存在 404；重复支付 409
+
+#### 小结
+
+已经把当前 Web API 从同步调用链升级为异步调用链：
+
+- Controller `async/await`
+- Service `Task` / `Task<T>`
+- Repository `Task` / `Task<T>`
+
+这为后面接数据库、网络调用打好了结构基础。
+
+**新的问题来了？**
+
+现在已经是异步调用链了，但还有一个现实问题：
+
+如果客户端中途取消请求（比如页面关闭、用户停止请求），这个取消信号如何传到 Controller、Service、Repository？
+
+这就需要对 **请求取消的传递** 处理。

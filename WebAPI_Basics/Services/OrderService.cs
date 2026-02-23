@@ -6,20 +6,20 @@ namespace WebAPI_Basics.Services;
 
 public class OrderService(IOrderRepository repo)
 {
-    public List<Order> GetAll() => repo.GetAll();
+    public async Task<List<Order>> GetAllAsync() => await repo.GetAllAsync();
 
-    public Order GetById(int id) => repo.GetById(id) ?? throw new OrderNotFoundException(id);
+    public async Task<Order> GetByIdAsync(int id) => await repo.GetByIdAsync(id) ?? throw new OrderNotFoundException(id);
 
-    public Order Create(OrderCreateRequest request) => repo.Add(request.Amount);
+    public async Task<Order> CreateAsync(OrderCreateRequest request) => await repo.AddAsync(request.Amount);
 
-    public Order Pay(int id)
+    public async Task<Order> PayAsync(int id)
     {
-        var order = repo.GetById(id);
+        var order = await repo.GetByIdAsync(id);
         if (order is null)
             throw new OrderNotFoundException(id);
         if (order.Status == "Paid")
             throw new OrderConflictException($"Order {id} was already paid");
-        repo.UpdateStatus(id, "Paid");
+        await repo.UpdateStatusAsync(id, "Paid");
         return order;
     }
 }

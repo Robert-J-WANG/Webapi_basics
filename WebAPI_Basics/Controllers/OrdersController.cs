@@ -10,18 +10,18 @@ namespace WebAPI_Basics.Controllers;
 public class OrdersController(OrderService service) : ControllerBase
 {
     [HttpGet]
-    public ActionResult<List<OrderResponse>> GetAll()
+    public async Task<ActionResult<List<OrderResponse>>> GetAll()
     {
-        var result = service.GetAll().Select(ToResponse).ToList();
+        var result = (await service.GetAllAsync()).Select(ToResponse).ToList();
         return Ok(result);
     }
 
     [HttpGet("{id:int}")]
-    public ActionResult<OrderResponse> GetById(int id)
+    public async Task<ActionResult<OrderResponse>> GetById(int id)
     {
         try
         {
-            var order = service.GetById(id);
+            var order = await service.GetByIdAsync(id);
             return Ok(ToResponse(order));
         }
         catch (OrderNotFoundException)
@@ -31,9 +31,9 @@ public class OrdersController(OrderService service) : ControllerBase
     }
 
     [HttpPost]
-    public ActionResult<OrderResponse> Create(OrderCreateRequest request)
+    public async Task<ActionResult<OrderResponse>> Create(OrderCreateRequest request)
     {
-        var order = service.Create(request);
+        var order = await service.CreateAsync(request);
         var response = ToResponse(order);
 
         return CreatedAtAction(
@@ -44,11 +44,11 @@ public class OrdersController(OrderService service) : ControllerBase
     }
 
     [HttpPost("{id:int}/pay")]
-    public ActionResult<OrderResponse> Pay(int id)
+    public async Task<ActionResult<OrderResponse>> Pay(int id)
     {
         try
         {
-            var order = service.Pay(id);
+            var order = await service.PayAsync(id);
             return Ok(ToResponse(order));
         }
         catch (OrderNotFoundException)
