@@ -1774,3 +1774,257 @@ if (order is null)
 
 因此需要对Service再分层，只保留业务流程
 
+### 9. 引入repository（存取）层
+
+#### 1. 解决什么问题？
+
+前面的章节，我们已经把 `OrdersController` 里的业务流程挪到了 `OrderService`，结构明显更清楚了：
+
+- Controller 负责 HTTP
+- Service 负责业务流程
+
+但 `OrderService` 里还在直接操作内存列表（查找、添加、更新订单）。
+
+这说明 Service 里仍然混着两类职责：
+
+1. 业务流程（创建、支付、规则判断）
+2. 数据存取（查、存、改）
+
+这一章要解决的是：**把“数据存取”单独抽出来，交给 Repository**。
+
+这样 Service 就只关心业务流程，不关心数据存在哪里、怎么取出来。
+
+#### 2. 为什么要引入 Repository？
+
+因为“业务流程”和“数据存取”变化的原因不同。
+
+- Service 会因为业务规则变化而改
+
+    例如：
+
+    - 支付前要增加更多判断
+    - 创建订单时增加默认逻辑
+
+- 数据存取会因为存储方式变化而改
+
+    例如：
+
+    - 现在是内存列表
+    - 以后可能换数据库（EF Core）
+
+如果这两类代码写在一起，后面换存储方式时会影响业务流程代码。
+
+把数据访问抽出来后，Service 只依赖一个“存取接口”，就更稳定。
+
+#### 3. 如何操作？
+
+这章做三件事：
+
+1. 定义 `IOrderRepository`（存取接口）
+2. 实现 `InMemoryOrderRepository`（内存版）
+3. 修改 `OrderService`：不再直接操作列表，改为调用 Repository
+
+Controller 的职责和行为保持不变。
+
+#### 4. 代码实现
+
+1. 定义 Repository 接口（先把“需要什么能力”说清楚）
+
+    新建文件夹和文件：`Repositories/IOrderRepository.cs`
+
+    ```c#
+    public interface IOrderRepository
+    {
+        List<Order> GetAll();
+        Order? GetById(int id);
+        Order Add(decimal amount);
+        void UpdateStatus(int id, string status);
+    }
+    ```
+
+    **这里为什么这样设计？**
+
+    先看它提供的四个能力：
+
+    - `GetAll()`：查询全部
+    - `GetById(id)`：按 id 查询
+    - `Add(amount)`：新增订单
+    - `UpdateStatus(id, status)`：更新状态
+
+    也就是说，Repository 只负责“存取动作”，不负责判断“能不能支付”。
+
+     “能不能支付”仍然是 Service 的业务规则。
+
+    这一点很关键：**Repository 是数据层，不是业务层**。
+
+2. 实现内存版 Repository
+
+    新建文件：`Repositories/InMemoryOrderRepository.cs`
+
+    ```c#
+    public class InMemoryOrderRepository : IOrderRepository
+    {
+        private static readonly List<Order> Orders =
+        [
+            new Order
+            {
+                Id = 1,
+                Amount = 100m,
+                Status = "Created"
+            },
+            new Order
+            {
+                Id = 2,
+                Amount = 200m,
+                Status = "Paid"
+            }
+        ];
+    
+        public List<Order> GetAll() => Orders.ToList();
+    
+        public Order? GetById(int id) => Orders.FirstOrDefault(x => x.Id == id);
+    
+        public Order Add(decimal amount)
+        {
+            var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
+            var order = new Order()
+            {
+                Id = nextId,
+                Amount = amount,
+                Status = "Created"
+            };
+            Orders.Add(order);
+            return order;
+        }
+    
+        public void UpdateStatus(int id, string status)
+        {
+            var order = Orders.FirstOrDefault(x => x.Id == id);
+            if (order is null)
+                return;
+            order.Status = status;
+        }
+    }
+    ```
+
+    数据存取职责在哪里？
+
+    现在订单列表已经从 `OrderService` 挪到了 `InMemoryOrderRepository` 里。
+
+    这意味着：
+
+    - Service 不再直接操作 `List`
+    - Service 只通过接口 `IOrderRepository` 取数据、存数据
+
+    这就是“数据存取抽离”的核心。
+
+3. 修改 `OrderService`，改为依赖 Repository
+
+    - 删除内部 `Orders` 列表
+    - 构造函数注入 `IOrderRepository`
+    - 所有数据操作改为调用 `repo`
+
+    ```c#
+    public class OrderService(IOrderRepository repo)
+    {
+        public List<Order> GetAll() => repo.GetAll();
+    
+        public Order GetById(int id) => repo.GetById(id) ?? throw new OrderNotFoundException(id);
+    
+        public Order Create(OrderCreateRequest request) => repo.Add(request.Amount);
+    
+        public Order Pay(int id)
+        {
+            var order = repo.GetById(id);
+            if (order is null)
+                throw new OrderNotFoundException(id);
+            if (order.Status == "Paid")
+                throw new OrderConflictException($"Order {id} was already paid");
+            repo.UpdateStatus(id, "Paid");
+            return order;
+        }
+    }
+    ```
+
+    **这里的逻辑是怎么分工的？**
+
+    Repository 负责数据存取
+
+    - 查订单
+    - 新增订单
+    - 更新状态
+
+    Service 负责业务规则与流程
+
+    以 `Pay(id)` 为例：
+
+    1. 通过 `_repo.GetById(id)` 查订单
+    2. 不存在 → 抛 `OrderNotFoundException`
+    3. 已支付 → 抛 `OrderConflictException`
+    4. 调用 `_repo.UpdateStatus(...)` 更新状态
+    5. 返回更新后的结果
+
+    这样业务流程和数据存取就拆开了。
+
+4. 在 `Program.cs` 注册 Repository
+
+    已经注册了 `OrderService`， 现在需要再注册 Repository，让框架知道 `IOrderRepository` 用哪个实现类。
+
+    ```c#
+     builder.Services.AddScoped<IOrderRepository,InMemoryOrderRepository > ();
+    ```
+
+    **为什么这里是“接口 + 实现”的注册方式？**
+
+    因为 Service 依赖的是 `IOrderRepository`（抽象），不是 `InMemoryOrderRepository`（具体实现）。
+
+    这样做的意义是：
+
+    - 当前用内存实现
+    - 以后换数据库实现时，Service 不用改，只要换注册映射即可
+
+    **这就是接口抽象的价值。**
+
+5. `OrdersController` 要不要改？
+
+    **不用改。**
+
+    这是这章非常重要的结果：
+
+    我们改了 Service 和数据层，但 Controller 的接口行为不需要变化。
+
+    这说明分层是有效的：
+
+    - 上层（Controller）不需要知道底层存储细节怎么实现
+
+#### 5. 用 Scalar 测试
+
+接口行为应该和第8章保持一致（这是本章检查重点）：
+
+- `GET /orders` → 200
+- `GET /orders/{id}` → 存在 200，不存在 404
+- `POST /orders`（合法）→ 201
+- `POST /orders`（非法 amount）→ 400
+- `POST /orders/{id}/pay` → 成功 200；不存在 404；重复支付 409
+
+#### 6. 小结
+
+完成了四层结构的基本拆分：
+
+- **Controller**：HTTP 接口层
+- **Service**：业务流程层
+- **Model** : 数据模型层
+- **Repository**：数据存取层（当前是内存实现）
+
+这一步非常关键，因为它让后面切换数据库时不需要推倒重写业务流程。
+
+**新的问题来了？**
+
+现在 Repository 和 Service 已经拆开了，但还有一个问题：
+
+- `OrdersController` 能拿到 `OrderService`
+- `OrderService` 能拿到 `IOrderRepository`
+
+这些对象是谁创建的？为什么会自动注入？
+
+我们在 `Program.cs` 里写了 `AddScoped(...)`，但还没有系统解释它背后的规则。
