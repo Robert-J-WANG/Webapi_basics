@@ -20,12 +20,22 @@ public class InMemoryOrderRepository : IOrderRepository
         }
     ];
 
-    public Task<List<Order>> GetAllAsync() => Task.FromResult(Orders.ToList());
-
-    public Task<Order?> GetByIdAsync(int id) => Task.FromResult(Orders.FirstOrDefault(x => x.Id == id));
-
-    public Task<Order> AddAsync(decimal amount)
+    public Task<List<Order>> GetAllAsync(CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(Orders.ToList());
+    }
+
+    public Task<Order?> GetByIdAsync(int id, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(Orders.FirstOrDefault(x => x.Id == id));
+    }
+
+
+    public Task<Order> AddAsync(decimal amount, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
         var order = new Order()
         {
@@ -37,13 +47,15 @@ public class InMemoryOrderRepository : IOrderRepository
         return Task.FromResult(order);
     }
 
-    public Task UpdateStatusAsync(int id, string status)
+    public Task UpdateStatusAsync(int id, string status, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var order = Orders.FirstOrDefault(x => x.Id == id);
         if (order != null)
         {
             order.Status = status;
         }
+
         return Task.CompletedTask;
     }
 }

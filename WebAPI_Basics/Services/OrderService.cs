@@ -6,20 +6,23 @@ namespace WebAPI_Basics.Services;
 
 public class OrderService(IOrderRepository repo)
 {
-    public async Task<List<Order>> GetAllAsync() => await repo.GetAllAsync();
+    public async Task<List<Order>> GetAllAsync(CancellationToken cancellationToken) =>
+        await repo.GetAllAsync(cancellationToken);
 
-    public async Task<Order> GetByIdAsync(int id) => await repo.GetByIdAsync(id) ?? throw new OrderNotFoundException(id);
+    public async Task<Order> GetByIdAsync(int id, CancellationToken cancellationToken) =>
+        await repo.GetByIdAsync(id, cancellationToken) ?? throw new OrderNotFoundException(id);
 
-    public async Task<Order> CreateAsync(OrderCreateRequest request) => await repo.AddAsync(request.Amount);
+    public async Task<Order> CreateAsync(OrderCreateRequest request, CancellationToken cancellationToken) =>
+        await repo.AddAsync(request.Amount, cancellationToken);
 
-    public async Task<Order> PayAsync(int id)
+    public async Task<Order> PayAsync(int id, CancellationToken cancellationToken)
     {
-        var order = await repo.GetByIdAsync(id);
+        var order = await repo.GetByIdAsync(id, cancellationToken);
         if (order is null)
             throw new OrderNotFoundException(id);
         if (order.Status == "Paid")
             throw new OrderConflictException($"Order {id} was already paid");
-        await repo.UpdateStatusAsync(id, "Paid");
+        await repo.UpdateStatusAsync(id, "Paid", cancellationToken);
         return order;
     }
 }

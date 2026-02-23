@@ -2539,3 +2539,341 @@ builder.Services.AddScoped<IOrderRepository, InMemoryOrderRepository>();
 如果客户端中途取消请求（比如页面关闭、用户停止请求），这个取消信号如何传到 Controller、Service、Repository？
 
 这就需要对 **请求取消的传递** 处理。
+
+
+
+### 12. CancellationToken
+
+#### 1. 要解决什么问题？
+
+把“请求取消”从 Controller 传到 Service / Repository.
+
+上一章我们已经把接口改成了异步调用链：
+
+- Controller → `async/await`
+- Service → `Task`
+- Repository → `Task`
+
+但异步还差一个很重要的现实问题：**请求被取消怎么办？**
+
+例如：
+
+- 用户在页面上发起请求后马上关闭页面
+- 客户端主动取消请求
+- 网关/代理中断了连接
+
+这时候如果服务端还继续执行后续逻辑（尤其是数据库/网络 IO），就会造成不必要的资源消耗。
+
+这一章要解决的是：**把请求取消信号（CancellationToken）沿着调用链传下去**，形成正确的结构。
+
+#### 2. 什么是 CancellationToken？它在这里扮演什么角色？
+
+`CancellationToken` 可以理解为一个“取消信号”。
+
+- 请求还在继续 → token 未取消
+- 客户端中断请求 → token 可能变为已取消
+
+在 ASP.NET Core 中，Action 参数里可以直接接收 `CancellationToken`。
+
+框架会把当前 HTTP 请求关联的取消信号传进来。
+
+也就是说，Controller 能拿到“请求是否被取消”的信号，然后把它继续传给 Service / Repository。
+
+#### 3. 调用链形态
+
+在当前这个项目里，Repository 还是内存实现，没有真实数据库 IO，所以很难看到明显取消效果。
+
+重点是建立正确的调用链形态：
+
+- Controller 接收 `CancellationToken`
+- Service 方法签名接收 `CancellationToken`
+- Repository 方法签名接收 `CancellationToken`
+- 调用时把 token 一路传下去
+
+后面换数据库或外部 HTTP 调用时，这个结构就能直接用上。
+
+#### 4. 如何操作
+
+改动顺序仍然按调用链走：
+
+1. `IOrderRepository` 增加 `CancellationToken` 参数
+2. `InMemoryOrderRepository` 实现同步更新
+3. `OrderService` 增加 `CancellationToken` 参数并继续传递
+4. `OrdersController` Action 接收 `CancellationToken` 并传给 Service
+
+业务行为保持不变。
+
+#### 5. 代码实现
+
+1. 修改 `IOrderRepository`（增加 token 参数）
+
+    文件：`Repositories/IOrderRepository.cs`
+
+    在异步签名基础上，为每个方法增加 `CancellationToken cancellationToken` 参数：
+
+    ```c#
+    public interface IOrderRepository
+    {
+        Task<List<Order>> GetAllAsync(CancellationToken cancellationToken);
+        Task<Order?> GetByIdAsync(int id, CancellationToken cancellationToken);
+        Task<Order> AddAsync(decimal amount, CancellationToken cancellationToken);
+        Task UpdateStatusAsync(int id, string status, CancellationToken cancellationToken);
+    }
+    ```
+
+    **为什么 Repository 也要接收 token？**
+
+    因为真正可能耗时的操作通常发生在 Repository（数据库）或外部调用层。
+
+    即使当前是内存实现，也应该先把接口形态设计好，这样后面换实现时不需要再改 Controller / Service 的方法签名。
+
+2. 修改 `InMemoryOrderRepository`（接收并传递 token）
+
+    文件：`Repositories/InMemoryOrderRepository.cs`
+
+    当前是内存操作，没有真实异步 IO。这里主要做两件事：
+
+    - 方法签名加上 `CancellationToken`
+    - 在方法开始处可选地调用 `cancellationToken.ThrowIfCancellationRequested()`（演示结构）
+
+    ```c#
+    public class InMemoryOrderRepository : IOrderRepository
+    {
+        private static readonly List<Order> Orders =
+        [
+            new Order
+            {
+                Id = 1,
+                Amount = 100m,
+                Status = "Created"
+            },
+            new Order
+            {
+                Id = 2,
+                Amount = 200m,
+                Status = "Paid"
+            }
+        ];
+    
+        public Task<List<Order>> GetAllAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(Orders.ToList());
+        }
+    
+        public Task<Order?> GetByIdAsync(int id, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(Orders.FirstOrDefault(x => x.Id == id));
+        }
+    
+    
+        public Task<Order> AddAsync(decimal amount, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var nextId = Orders.Count == 0 ? 1 : Orders.Max(x => x.Id) + 1;
+            var order = new Order()
+            {
+                Id = nextId,
+                Amount = amount,
+                Status = "Created"
+            };
+            Orders.Add(order);
+            return Task.FromResult(order);
+        }
+    
+        public Task UpdateStatusAsync(int id, string status, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var order = Orders.FirstOrDefault(x => x.Id == id);
+            if (order != null)
+            {
+                order.Status = status;
+            }
+            return Task.CompletedTask;
+        }
+    }
+    ```
+
+    **这里的 `ThrowIfCancellationRequested()` 是什么作用？**
+
+    它会在 token 已取消时抛出 `OperationCanceledException`，表示当前操作应当停止。
+
+    在这一章里，它主要是帮助你建立认知：
+
+    - token 不只是“传递着玩”
+    - 它可以在合适位置被检查并终止流程
+
+    当前是基础版，不需要在 Controller 里专门处理这个异常。
+
+3. 修改 `OrderService`（接收 token 并继续传递）
+
+    文件：`Services/OrderService.cs`
+
+    把方法签名加上 `CancellationToken cancellationToken`，并传给 Repository。
+
+    ```c#
+    using WebAPI_Basics.Domain;
+    using WebAPI_Basics.Dtos.Requests;
+    using WebAPI_Basics.Repositories;
+    
+    namespace WebAPI_Basics.Services;
+    
+    public class OrderService(IOrderRepository repo)
+    {
+        public async Task<List<Order>> GetAllAsync(CancellationToken cancellationToken) =>
+            await repo.GetAllAsync(cancellationToken);
+    
+        public async Task<Order> GetByIdAsync(int id, CancellationToken cancellationToken) =>
+            await repo.GetByIdAsync(id, cancellationToken) ?? throw new OrderNotFoundException(id);
+    
+        public async Task<Order> CreateAsync(OrderCreateRequest request, CancellationToken cancellationToken) =>
+            await repo.AddAsync(request.Amount, cancellationToken);
+    
+        public async Task<Order> PayAsync(int id, CancellationToken cancellationToken)
+        {
+            var order = await repo.GetByIdAsync(id, cancellationToken);
+            if (order is null)
+                throw new OrderNotFoundException(id);
+            if (order.Status == "Paid")
+                throw new OrderConflictException($"Order {id} was already paid");
+            await repo.UpdateStatusAsync(id, "Paid", cancellationToken);
+            return order;
+        }
+    }
+    ```
+
+    **这里的关键点是什么**？
+
+    Service 这一层目前没有复杂取消逻辑，它的职责是：
+
+    - 接收 token
+    - 调用下层时继续传递 token
+
+    这一步很重要，因为很多项目里取消信号就是在中间层被“断掉”的。
+
+    一旦断掉，底层即使支持取消也用不上。
+
+4. 修改 `OrdersController`（从 Action 参数接收 token）
+
+    文件：`Controllers/OrdersController.cs`
+
+    为每个 Action 增加 `CancellationToken cancellationToken` 参数，并传给 `service`。
+
+    ```c#
+    [ApiController]
+    [Route("[controller]")]
+    public class OrdersController(OrderService service) : ControllerBase
+    {
+        [HttpGet]
+        public async Task<ActionResult<List<OrderResponse>>> GetAll(CancellationToken cancellationToken)
+        {
+            var result = (await service.GetAllAsync(cancellationToken)).Select(ToResponse).ToList();
+            return Ok(result);
+        }
+    
+        [HttpGet("{id:int}")]
+        public async Task<ActionResult<OrderResponse>> GetById(int id, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var order = await service.GetByIdAsync(id, cancellationToken);
+                return Ok(ToResponse(order));
+            }
+            catch (OrderNotFoundException)
+            {
+                return NotFound();
+            }
+        }
+    
+        [HttpPost]
+        public async Task<ActionResult<OrderResponse>> Create(OrderCreateRequest request,CancellationToken cancellationToken)
+        {
+            var order = await service.CreateAsync(request, cancellationToken);
+            var response = ToResponse(order);
+    
+            return CreatedAtAction(
+                nameof(GetById),
+                new { id = response.Id },
+                response
+            );
+        }
+    
+        [HttpPost("{id:int}/pay")]
+        public async Task<ActionResult<OrderResponse>> Pay(int id, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var order = await service.PayAsync(id,cancellationToken);
+                return Ok(ToResponse(order));
+            }
+            catch (OrderNotFoundException)
+            {
+                return NotFound();
+            }
+            catch (OrderConflictException ex)
+            {
+                return Conflict(new { message = ex.Message });
+            }
+        }
+    
+        //辅助方法： 把OrderItem转换成OrderResponse
+        private OrderResponse ToResponse(Order order)
+        {
+            return new OrderResponse
+            {
+                Id = order.Id,
+                Amount = order.Amount,
+                Status = order.Status,
+            };
+        }
+    }
+    ```
+
+    **这里有一个你容易忽略但很重要的点：**
+
+    - `CreatedAtAction(nameof(GetById), ...)` 仍然可以用
+
+    虽然 `GetById` 现在多了一个 `CancellationToken` 参数，但 `CreatedAtAction` 仍然只需要传路由参数：
+
+    ```csharp
+    new { id = response.Id }
+    ```
+
+    因为 `CancellationToken` 不是路由参数，它是框架在运行时提供的请求取消信号，不参与 URL 路由匹配。
+
+#### 6. 用 Scalar 测试
+
+在当前内存实现下，接口行为应该和上一章保持一致：
+
+- `GET /orders` → 200
+- `GET /orders/{id}` → 存在 200，不存在 404
+- `POST /orders`（合法）→ 201
+- `POST /orders`（非法 amount）→ 400
+- `POST /orders/{id}/pay` → 成功 200；不存在 404；重复支付 409
+
+这章的重点不是功能变化，而是把取消信号正确地接入和传递。
+
+#### 7. 小结
+
+把“请求取消”纳入了调用链设计：
+
+- Controller 能接收请求级 `CancellationToken`
+- Service 能继续传递 token
+- Repository 接口和实现也支持 token
+
+这为后面接数据库、HTTP 客户端等真实 IO 场景打下基础。
+
+**新的问题来了？**
+
+现在的 API 已经具备了：
+
+- 基础 CRUD 中的读/建
+- 动作端点（Pay）
+- 状态码语义
+- 验证、异常、分层、DI、异步、取消传递
+
+但查询能力还比较弱：`GET /orders` 目前只能返回全部订单，无法按条件筛选，也不能分页。
+
+因此，还需要处理：**Query 参数：过滤 / 排序 / 分页**。
+

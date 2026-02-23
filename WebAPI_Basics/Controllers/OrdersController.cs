@@ -10,18 +10,18 @@ namespace WebAPI_Basics.Controllers;
 public class OrdersController(OrderService service) : ControllerBase
 {
     [HttpGet]
-    public async Task<ActionResult<List<OrderResponse>>> GetAll()
+    public async Task<ActionResult<List<OrderResponse>>> GetAll(CancellationToken cancellationToken)
     {
-        var result = (await service.GetAllAsync()).Select(ToResponse).ToList();
+        var result = (await service.GetAllAsync(cancellationToken)).Select(ToResponse).ToList();
         return Ok(result);
     }
 
     [HttpGet("{id:int}")]
-    public async Task<ActionResult<OrderResponse>> GetById(int id)
+    public async Task<ActionResult<OrderResponse>> GetById(int id, CancellationToken cancellationToken)
     {
         try
         {
-            var order = await service.GetByIdAsync(id);
+            var order = await service.GetByIdAsync(id, cancellationToken);
             return Ok(ToResponse(order));
         }
         catch (OrderNotFoundException)
@@ -31,9 +31,9 @@ public class OrdersController(OrderService service) : ControllerBase
     }
 
     [HttpPost]
-    public async Task<ActionResult<OrderResponse>> Create(OrderCreateRequest request)
+    public async Task<ActionResult<OrderResponse>> Create(OrderCreateRequest request,CancellationToken cancellationToken)
     {
-        var order = await service.CreateAsync(request);
+        var order = await service.CreateAsync(request, cancellationToken);
         var response = ToResponse(order);
 
         return CreatedAtAction(
@@ -44,11 +44,11 @@ public class OrdersController(OrderService service) : ControllerBase
     }
 
     [HttpPost("{id:int}/pay")]
-    public async Task<ActionResult<OrderResponse>> Pay(int id)
+    public async Task<ActionResult<OrderResponse>> Pay(int id, CancellationToken cancellationToken)
     {
         try
         {
-            var order = await service.PayAsync(id);
+            var order = await service.PayAsync(id,cancellationToken);
             return Ok(ToResponse(order));
         }
         catch (OrderNotFoundException)
