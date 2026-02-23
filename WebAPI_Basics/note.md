@@ -2238,7 +2238,7 @@ builder.Services.AddScoped<IOrderRepository, InMemoryOrderRepository>();
 
 
 
-### 10. Async Web API
+### 11. Async Web API
 
 #### 1. 要解决什么问题？
 
