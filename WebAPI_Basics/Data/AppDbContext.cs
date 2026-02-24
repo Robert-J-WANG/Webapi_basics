@@ -1,9 +1,13 @@
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
-using WebAPI_Basics.Domain;
 
 namespace WebAPI_Basics.Data;
 
-public class AppDbContext(DbContextOptions<AppDbContext> options):DbContext(options)
+public class AppDbContext:DbContext
 {
-    public DbSet<Order> Orders => Set<Order>();
+   
+   public AppDbContext(DbContextOptions<AppDbContext> options):base(options){}
+   
+   //
+  
 }

@@ -1,3 +1,4 @@
+
 using Microsoft.EntityFrameworkCore;
 using WebAPI_Basics.Data;
 using WebAPI_Basics.Repositories;
@@ -11,6 +12,7 @@ public class Program
 {
     public static void Main(string[] args)
     {
+        
         // --- 1. 实例化 WebApplicationBuilder ---
         
         // 初始化配置系统（Configuration）、日志工厂（Logging）及依赖注入容器（DI Container）。
@@ -24,6 +26,8 @@ public class Program
         // 注册我们自己的类型模型依赖
         builder.Services.AddScoped<OrderService>();
         builder.Services.AddScoped<IOrderRepository,InMemoryOrderRepository > ();
+       
+        // builder.Services.AddScoped<IOrderRepository,SqlServerOrderRepository > ();
         
         // 注册数据库
         builder.Services.AddDbContext<AppDbContext>(options =>options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));

@@ -1,24 +1,362 @@
 ## WEB API (Controller) 进阶
 
-引入 EF Core（SQL Server + Docker）
+### 1. 从内存到数据库
 
-从内存数据到数据库持久化
+#### 1. 解决什么问题？
 
-#### 1. 要解决什么问题？
+第一阶段的 `Order API` 已经完成了分层结构（Controller / Service / Repository），接口也能正常工作。
 
-第一阶段的 `Order API` 已经有了完整骨架（分层、模型、异常、DI、async、Query 等），但数据仍然存在内存里：
+但数据存放在内存里，程序一重启就丢失。但是我们有新的需求：
 
-- 程序一重启，订单就没了
-- 无法真正积累数据
-- 不像真实项目
+- 订单数据要持久化
+- 程序重启后数据不能丢
+- 项目要更接近真实开发
 
-这一章要解决的是：
+因此，需要解决从内存切到数据库的配置问题。
 
-> 把项目从“内存数据”升级到“数据库环境已接入”的状态，为后续把 Repository 切到数据库做好准备。
+#### 2. 连接数据库
 
-注意这一章的目标是 **先把数据库接入能力准备好**，不是一次性把所有数据访问代码都改完。
+使用SQL Server数据库，配合Docker容器镜像使用
 
-#### 2. EF Core 在这里是干什么的？
+启动 SQL Server（Docker）
+
+```bash
+docker pull mcr.microsoft.com/mssql/server:2022-latest
+docker run -e "ACCEPT_EULA=Y" \
+  -e "MSSQL_SA_PASSWORD=YourStrong!Passw0rd" \
+  -e "MSSQL_PID=Developer" \
+  -p 1433:1433 \
+  --name webapi-sqlserver \
+  -d mcr.microsoft.com/mssql/server:2022-latest
+```
+
+检查容器是否运行：
+
+```bash
+docker ps
+```
+
+如果启动失败，查看日志：
+
+```bash
+docker logs webapi-sqlserver
+```
+
+到这里，数据库环境已经准备好。
+
+#### 3. 使用数据库
+
+我们之前的版本，使用`InMemoryOrderRepository`来存取数据（通过内存）。
+
+现在创建一个用数据库的仓库`SqlServerOrderRepository`来实现同样的功能。
+
+~~不要看懂代码细节~~
+
+```csharp
+using Microsoft.Data.SqlClient;
+using WebAPI_Basics.Domain;
+
+namespace WebAPI_Basics.Repositories;
+
+public class SqlServerOrderRepository : IOrderRepository
+{
+    private const string ConnectionString =
+        "Server=localhost,1433;Database=orderDB;User Id=sa;Password=Mxxxxx12345!;TrustServerCertificate=True;Encrypt=False";
+
+    // 简单进程内保护，避免同一次应用运行中重复初始化
+    private static bool _initialized;
+    private static readonly SemaphoreSlim InitLock = new(1, 1);
+
+    public async Task<List<Order>> GetAllAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await EnsureInitializedAsync(cancellationToken);
+
+        var orders = new List<Order>();
+
+        const string sql = """
+                           SELECT Id, Amount, Status
+                           FROM Orders
+                           """;
+
+        await using var conn = new SqlConnection(ConnectionString);
+        await conn.OpenAsync(cancellationToken);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            orders.Add(MapOrder(reader));
+        }
+
+        return orders;
+    }
+
+    public async Task<Order?> GetByIdAsync(int id, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await EnsureInitializedAsync(cancellationToken);
+
+        const string sql = """
+                           SELECT Id, Amount, Status
+                           FROM Orders
+                           WHERE Id = @id
+                           """;
+
+        await using var conn = new SqlConnection(ConnectionString);
+        await conn.OpenAsync(cancellationToken);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@id", id);
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+        if (!await reader.ReadAsync(cancellationToken))
+            return null;
+
+        return MapOrder(reader);
+    }
+
+    public async Task<Order> AddAsync(decimal amount, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await EnsureInitializedAsync(cancellationToken);
+
+        // 保持和 InMemory 版本行为一致：新订单状态 = Created
+        // 假设 Id 是 IDENTITY
+        const string sql = """
+                           INSERT INTO Orders (Amount, Status)
+                           OUTPUT INSERTED.Id, INSERTED.Amount, INSERTED.Status
+                           VALUES (@amount, @status)
+                           """;
+
+        await using var conn = new SqlConnection(ConnectionString);
+        await conn.OpenAsync(cancellationToken);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@amount", amount);
+        cmd.Parameters.AddWithValue("@status", "Created");
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+        if (!await reader.ReadAsync(cancellationToken))
+            throw new InvalidOperationException("Failed to create order.");
+
+        return MapOrder(reader);
+    }
+
+    public async Task UpdateStatusAsync(int id, string status, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await EnsureInitializedAsync(cancellationToken);
+
+        // 保持和 InMemory 版本行为一致：找不到不抛异常
+        const string sql = """
+                           UPDATE Orders
+                           SET Status = @status
+                           WHERE Id = @id
+                           """;
+
+        await using var conn = new SqlConnection(ConnectionString);
+        await conn.OpenAsync(cancellationToken);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@status", status);
+        cmd.Parameters.AddWithValue("@id", id);
+
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static Order MapOrder(SqlDataReader reader)
+    {
+        return new Order
+        {
+            Id = reader.GetInt32(reader.GetOrdinal("Id")),
+            Amount = reader.GetDecimal(reader.GetOrdinal("Amount")),
+            Status = reader.GetString(reader.GetOrdinal("Status"))
+        };
+    }
+
+    /// <summary>
+    /// 确保 Orders 表存在，并在空表时插入与 InMemory 版本一致的初始数据。
+    /// </summary>
+    private static async Task EnsureInitializedAsync(CancellationToken cancellationToken)
+    {
+        if (_initialized) return;
+
+        await InitLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_initialized) return;
+
+            await using var conn = new SqlConnection(ConnectionString);
+            await conn.OpenAsync(cancellationToken);
+
+            // 1) 建表（如果不存在）
+            const string createTableSql = """
+                                          IF OBJECT_ID('dbo.Orders', 'U') IS NULL
+                                          BEGIN
+                                              CREATE TABLE dbo.Orders
+                                              (
+                                                  Id INT IDENTITY(1,1) PRIMARY KEY,
+                                                  Amount DECIMAL(18,2) NOT NULL,
+                                                  Status NVARCHAR(20) NOT NULL
+                                              );
+                                          END;
+                                          """;
+
+            await using (var createCmd = new SqlCommand(createTableSql, conn))
+            {
+                await createCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 2) 如果表为空，插入与 InMemoryOrderRepository 对齐的两条默认数据
+            const string seedSql = """
+                                   IF NOT EXISTS (SELECT 1 FROM dbo.Orders)
+                                   BEGIN
+                                       INSERT INTO dbo.Orders (Amount, Status)
+                                       VALUES (100, N'Created'),
+                                              (200, N'Paid');
+                                   END;
+                                   """;
+
+            await using (var seedCmd = new SqlCommand(seedSql, conn))
+            {
+                await seedCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            _initialized = true;
+        }
+        finally
+        {
+            InitLock.Release();
+        }
+    }
+}
+```
+
+在DI容器中注册
+
+```c#
+builder.Services.AddScoped<IOrderRepository,SqlServerOrderRepository > ();
+```
+
+这样，数据会持久存储在数据库中。
+
+#### 3. 直接连接数据库会遇到什么问题？
+
+这种手动连接方式，很快会出现问题：
+
+- 连接字符串到处写，修改时容易漏
+- 打开/关闭连接代码重复
+- SQL 细节和业务逻辑混在一起
+- 后面查询、更新一多，service代码会迅速膨胀
+
+**如何优化？**
+
+可以把和数据库操作相关的逻辑抽离出来，封装成一个专用的类 AppDbContext， 类似这样：
+
+```c#
+using Microsoft.Data.SqlClient;
+
+namespace WebAPI_Basics.Data;
+
+public class AppDbContext
+{
+    private readonly string _connectionString;
+
+    private static bool _initialized;
+    private static readonly SemaphoreSlim InitLock = new(1, 1);
+
+    public AppDbContext(string connectionString)
+    {
+        _connectionString = connectionString;
+    }
+
+    public SqlConnection CreateConnection()
+    {
+        return new SqlConnection(_connectionString);
+    }
+
+    /// <summary>
+    /// 确保数据库中的 Orders 表存在，并在空表时插入初始数据。
+    /// </summary>
+    public async Task EnsureInitializedAsync(CancellationToken cancellationToken)
+    {
+        if (_initialized) return;
+
+        await InitLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_initialized) return;
+
+            await using var conn = CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+
+            const string createTableSql = """
+                                          IF OBJECT_ID('dbo.Orders', 'U') IS NULL
+                                          BEGIN
+                                              CREATE TABLE dbo.Orders
+                                              (
+                                                  Id INT IDENTITY(1,1) PRIMARY KEY,
+                                                  Amount DECIMAL(18,2) NOT NULL,
+                                                  Status NVARCHAR(20) NOT NULL
+                                              );
+                                          END;
+                                          """;
+
+            await using (var createCmd = new SqlCommand(createTableSql, conn))
+            {
+                await createCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            const string seedSql = """
+                                   IF NOT EXISTS (SELECT 1 FROM dbo.Orders)
+                                   BEGIN
+                                       INSERT INTO dbo.Orders (Amount, Status)
+                                       VALUES (100, N'Created'),
+                                              (200, N'Paid');
+                                   END;
+                                   """;
+
+            await using (var seedCmd = new SqlCommand(seedSql, conn))
+            {
+                await seedCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            _initialized = true;
+        }
+        finally
+        {
+            InitLock.Release();
+        }
+    }
+}
+```
+
+如果，需求增多时，需要让他实现大量功能：
+
+- 连接管理
+- 命令执行
+- 查询结果映射到对象
+- 参数化查询
+- 更新保存
+- 模型和表结构关系管理
+- 后续数据库结构变更管理
+- ...
+
+我们使用时，直接通过DI容器注入使用。
+
+**但是，如何实现这么复杂的逻辑，能完美工作？？需要自己编写？？？**
+
+理论上可以自己写一个 `AppDbContext`，把连接和执行逻辑封装起来。
+
+但有人已经完成了这个工作，不需要自己造轮子，直接可以**继承使用。**
+
+
+
+#### 4. 使用第三方库 - EF Core？
 
 EF Core 是 .NET 里常用的 ORM（对象关系映射），可以用 C# 对象和 LINQ 操作关系型数据库，而不用一开始就手写大量 SQL。
 
@@ -26,87 +364,40 @@ EF Core 是 .NET 里常用的 ORM（对象关系映射），可以用 C# 对象�
 
 - SQL Server Provider 同样适用于 Azure SQL。
 
-这章先只记住一句话：
+**EF Core 提供了一个核心基类：**
 
-> EF Core 是我们项目连接数据库、读写数据库的主要工具。
+- `DbContext`
 
-#### 3. 如何操作？
+它本质上就是“数据库访问上下文”的成熟实现。
 
-顺序很重要，按这个来就不会乱：
+于是当前项目的做法就自然变成：
 
-1. 启动 SQL Server Docker 容器
-2. 给项目安装 EF Core 包
-3. 在 `appsettings.json` 配连接字符串
-4. 创建 `AppDbContext`
-5. 在 `Program.cs` 注册 `DbContext`
-6. 先跑通项目（还不改 Repository）
+- 自定义 `AppDbContext`
+- 继承 EF Core 的 `DbContext`
+- 在此基础上放当前项目自己的数据库访问定义
 
-#### 4. 实现步骤
 
-1. 启动 SQL Server（Docker）
 
-    - 先拉取镜像（SQL Server 2022）
+#### 5. 如何操作？
 
-        ```bash
-        docker pull mcr.microsoft.com/mssql/server:2022-latest
-        ```
-
-    - 启动容器（开发环境示例）
-
-        ```bash
-        docker run -e "ACCEPT_EULA=Y" \
-          -e "MSSQL_SA_PASSWORD=YourStrong!Passw0rd" \
-          -e "MSSQL_PID=Developer" \
-          -p 1433:1433 \
-          --name webapi-sqlserver \
-          -d mcr.microsoft.com/mssql/server:2022-latest
-        ```
-
-        参数解释:
-
-        - `ACCEPT_EULA=Y`：接受协议（必须）
-        - `MSSQL_SA_PASSWORD`：`sa` 账号密码（自己设一个强密码）
-        - `MSSQL_PID=Developer`：开发版
-        - `-p 1433:1433`：把宿主机端口映射到容器里的 SQL Server 端口
-        - `--name webapi-sqlserver`：容器名字，后面好管理
-
-2. 确认容器是否启动成功
-
-    ```bash
-    docker ps
-    ```
-
-    应该能看到 `webapi-sqlserver` 在运行，端口里有 `1433->1433` 映射。
-
-    如果启动失败，先看日志：
-
-    ```bash
-    docker logs webapi-sqlserver
-    ```
-
-3. 给项目安装 EF Core（SQL Server）包
-
-    这一章我们只装这几个最常用、够用的包。
-
-    在项目目录执行：
+1. 安装 EF Core 相关包
 
     ```bash
     dotnet add package Microsoft.EntityFrameworkCore.SqlServer
     dotnet add package Microsoft.EntityFrameworkCore.Design
     ```
 
-    **为什么装这两个？**
+    这两个包先各自承担一个角色：
 
-    - `Microsoft.EntityFrameworkCore.SqlServer`：SQL Server Provider（让 EF Core 能连 SQL Server）([Microsoft Learn](https://learn.microsoft.com/en-us/ef/core/providers/sql-server/?utm_source=chatgpt.com))
-    - `Microsoft.EntityFrameworkCore.Design`：后面做 Migration 会用到（这章先装好，避免后面再回头补）
+    - `SqlServer` 包：让 EF Core 能连接 SQL Server
+    - `Design` 包：管理数据库结构
 
-    > 这一章先不装太多包，先保持最小可用。
+2. 配置连接字符串
 
-4. 在 `appsettings.json` 添加连接字符串
-
-    在 `appsettings.json` 里加入（或补充）`ConnectionStrings`：
+    `appsettings.json`中集中管理，不写死在业务代码里
 
     ```c#
+    // 添加字段
     {
       "ConnectionStrings": {
         "DefaultConnection": "Server=localhost,1433;Database=WebApiBasicsDb;User Id=sa;Password=YourStrong!Passw0rd;TrustServerCertificate=True;Encrypt=False"
@@ -114,20 +405,9 @@ EF Core 是 .NET 里常用的 ORM（对象关系映射），可以用 C# 对象�
     }
     ```
 
-    **连接字符串先这样写的原因?**
+3. 优化 `AppDbContext`（继承 `DbContext`）
 
-    这一章目标是先跑通本地开发连接，所以先用最直接的方式：
-
-    - `Server=localhost,1433`
-    - `Database=WebApiBasicsDb`（数据库名先定好，后面会用到）
-    - `sa` 登录
-    - `TrustServerCertificate=True;Encrypt=False`（本地开发环境简化连接）
-
-    后面配置章节再系统整理配置管理方式。
-
-5. 创建 `AppDbContext`
-
-    创建文件：`Data/AppDbContext.cs`（文件夹名先用 `Data/` 更直观）
+    优化文件：`Data/AppDbContext.cs`内容
 
     ```c#
     using Microsoft.EntityFrameworkCore;
@@ -141,91 +421,99 @@ EF Core 是 .NET 里常用的 ORM（对象关系映射），可以用 C# 对象�
         {
         }
     
-        public DbSet<Order> Orders => Set<Order>();
+        // 其他逻辑
     }
     ```
 
-    这里先讲清楚两个概念（本章会用到的）
+    暂时只跑通配置
 
-    - `DbContext`
+    `AppDbContext : DbContext`
 
-        它可以理解成 EF Core 和数据库交互的入口对象。
+    我们定义的数据库上下文类继承 **EF Core** 提供的基类 ` DbContext`, 这样，就能使用它的全部功能
 
-        以后查询、保存、迁移配置都围绕它展开。
+4. 在 `Program.cs` 注册 `AppDbContext`
 
-    - `DbSet<Order>`
-
-        表示“订单这张数据集合”。
-
-        现在可以先把它理解成“订单表的入口”。
-
-6. 在 `Program.cs` 注册 `AppDbContext`
-
-    顶部补 `using`：
+    先补 `using`：
 
     ```csharp
     using Microsoft.EntityFrameworkCore;
     using WebAPI_Basics.Data;
     ```
 
-    然后在服务注册区域加入 `DbContext` 注册：
+    然后在服务注册区域加入：
 
     ```csharp
     builder.Services.AddDbContext<AppDbContext>(options =>
         options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
     ```
 
-    这一步把：
+以后需要使用 AppDbContext 时，仍然通过 DI 方式。
 
-    - 配置里的连接字符串
-    - EF Core SQL Server Provider
-    - `AppDbContext`
+#### 6. 如何验证？
 
-    连起来了。
+这一章是“数据库基础设施是否接通”，不是“订单表是否已经创建”。
 
-#### 5. 如何验证？
-
-这一章先做两个级别的验证。
-
-**验证 1：项目能正常启动**
-
-运行项目，没有因为 `DbContext` 注册报错。
-
-如果报连接字符串为空、`UseSqlServer` 找不到等问题，通常是：
-
-- NuGet 包没装好
-- `using Microsoft.EntityFrameworkCore;` 漏了
-- `appsettings.json` 键名不一致（`DefaultConnection` 拼错）
-
-**验证 2：SQL Server 容器确实在运行**
+**验证 1：SQL Server 容器运行正常**
 
 ```bash
 docker ps
 ```
 
-确认容器还活着，端口映射正常。
+确认容器 `webapi-sqlserver` 正在运行，并且有 `1433:1433` 端口映射。
 
-> 这一章暂时还没创建表，所以还看不到 `Orders` 表，这是正常的。
+**验证 2：手动连接演示可以成功**
 
-#### 6. 本章小结
+运行前面的手动连接示例代码，确认能输出连接成功信息。
 
-这一章先把数据库环境接入和 EF Core 基础设施准备好：
+这一步是为了确认：
 
-- SQL Server（Docker）已启动
-- EF Core SQL Server 包已安装
-- 连接字符串已配置
-- `AppDbContext` 已创建
-- `Program.cs` 已注册 `DbContext`
+- SQL Server 环境可用
+- 用户名/密码/端口配置正确
 
-这一步完成后，项目就从“纯内存 API”进入了“可接数据库”的状态。
+**验证 3：项目启动不报 `DbContext` 配置错误**
 
-**新的问题来了?**
+运行项目，确认因为 `AddDbContext` / `UseSqlServer` 相关配置不会报错。
 
-现在项目已经能连接数据库了，但数据库里还没有订单表，`Order` 模型和数据库结构之间的关系也还没落地。
+如果报错，优先检查：
 
-下一章就解决这个问题：
+- EF Core 包是否安装成功
+- `using Microsoft.EntityFrameworkCore;` 是否遗漏
+- `DefaultConnection` 名字是否拼错
+- SQL Server 容器是否已启动
 
-**实体与 `DbContext`：让 `Order` 落到数据库表。**
+**验证 4：现有接口行为保持不变**
 
+切换回`InMemoryOrderRepository`，当前主线仍然是内存版。
 
+所以以下接口行为应与第一阶段末尾一致：
 
+- `GET /orders`
+- `GET /orders/{id}`
+- `POST /orders`
+- `POST /orders/{id}/pay`
+
+这说明当前改动只是在“接入数据库基础设施”，没有破坏现有业务主线。
+
+#### 7. 本章小结
+
+这一章完成了从内存到数据库的第一步过渡：
+
+- 先证明直接连接数据库是可行的
+- 再看到直接连接会带来重复和混乱
+- 因此需要统一的数据库访问入口
+- 使用 EF Core 的 `DbContext` 作为成熟实现
+- 定义 `AppDbContext` 并注册到 DI
+- 完成数据库基础设施接入
+
+到这里，项目已经具备了“连接数据库的能力”，但还没有真正把订单模型落到数据库表里。
+
+**新的问题来了？**
+
+现在已经有了数据库入口 `AppDbContext`，但还有一个关键问题没解决：
+
+- `Order` 在代码里只是一个类
+- 数据库并不知道它该变成什么表、哪些字段怎么约束
+
+因此需要解决：
+
+如何把 `Order` 这类对象关联数据库模型，并明确它和表结构的对应关系。
