@@ -1,3 +1,5 @@
+using Microsoft.EntityFrameworkCore;
+using WebAPI_Basics.Data;
 using WebAPI_Basics.Repositories;
 using WebAPI_Basics.Services;
 
@@ -22,6 +24,9 @@ public class Program
         // 注册我们自己的类型模型依赖
         builder.Services.AddScoped<OrderService>();
         builder.Services.AddScoped<IOrderRepository,InMemoryOrderRepository > ();
+        
+        // 注册数据库
+        builder.Services.AddDbContext<AppDbContext>(options =>options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
         
         // 注册 Microsoft.AspNetCore.OpenApi 服务，利用 .NET 9 原生的元数据提取技术生成 OpenAPI 3.1 规范文档。
         builder.Services.AddOpenApi(); 
