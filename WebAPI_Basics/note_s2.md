@@ -1291,3 +1291,238 @@ public class OrderService(IOrderRepository repo)
 - 为什么有时改了属性 `SaveChanges` 就会更新？
 - 为什么有时又不会？
 - 什么时候需要先查出来？什么时候可以更直接更新？
+
+
+
+下面开始按你现在“进阶笔记”的推进逻辑来写**第6章**：它要自然承接第5章「查询下推」之后的“新问题”——**更新到底是怎么发生的？为什么有时改了属性就能更新，有时又不更新？什么时候必须先查？什么时候可以直接更新？**
+
+
+
+## 第6章：EF Core 更新机制
+
+### 1. 解决什么问题？
+
+在第4~5章的 EF Repository 里，更新状态是这么写的（逻辑类似）：
+
+- 先 `FirstOrDefaultAsync` 把订单查出来
+- `order.Status = "Paid"`
+- `db.SaveChangesAsync()`
+
+为什么“改属性 + SaveChanges”就能更新？
+
+有没有办法不先查出来就更新？
+
+因此需要弄清楚 EF Core 的“更新底层规则”。
+
+
+
+### 2. EF Core 为什么知道改了什么？
+
+#### 2.1 DbContext 会“追踪”实体（Tracking）
+
+当用下面这种方式查数据：
+
+```csharp
+var order = await db.Orders.FirstOrDefaultAsync(x => x.Id == id, ct);
+```
+
+EF Core 默认会做一件事：
+
+- 把 `order` 放进 DbContext 的“跟踪器（Change Tracker）”
+- 记录它当前的属性值快照（原始值）
+
+随后执行如下操作的话：
+
+```csharp
+order.Status = "Paid";
+```
+
+EF Core 会发现：
+
+- `Status` 从原值变成了新值
+- 这个实体进入“Modified”状态 （被修改）
+
+最后调用：
+
+```csharp
+await db.SaveChangesAsync(ct);
+```
+
+EF Core 就会生成类似这样的 SQL（概念）：
+
+```sql
+UPDATE Orders SET Status = N'Paid' WHERE Id = @id;
+```
+
+**更新能发生，是因为实体被 DbContext 跟踪了。**
+
+
+
+### 3. 为什么有时候改了属性却“不更新”？
+
+#### 3.1 不让EF core跟踪查询 
+
+调用 `AsNoTracking()`方法，可以不让EF core跟踪。
+
+如果写了：
+
+```csharp
+var order = await db.Orders
+    .AsNoTracking()
+    .FirstOrDefaultAsync(x => x.Id == id, ct);
+```
+
+此时 `order` **不在 Change Tracker 里**。
+
+改它的属性，DbContext 根本不知道——`SaveChanges` 也就不会生成 UPDATE。
+
+适用场景：**纯查询（GetAll/GetById）**，为了更快、更省内存。
+
+#### 3.2 你拿到的是“新对象”，不是 DbContext 跟踪的那个对象
+
+比如自己 new 了一个：
+
+```csharp
+var order = new Order { Id = id, Status = "Paid" };
+order.Status = "Paid";
+await db.SaveChangesAsync(ct);
+```
+
+这也不会更新，因为 DbContext 从来没追踪过它。
+
+
+
+### 4. 两种更新方式
+
+现在的 `Pay` 更新，是“典型业务写法”——**先查再改**。但这不是唯一方式。
+
+#### 写法 A：先查出来再更新（最稳、最常见）
+
+代码如下:
+
+```csharp
+public async Task UpdateStatusAsync(int id, string status, CancellationToken ct)
+{
+    ct.ThrowIfCancellationRequested();
+
+    var order = await db.Orders.FirstOrDefaultAsync(x => x.Id == id, ct); // 默认跟踪
+    if (order is null) return;
+    order.Status = status;
+    await db.SaveChangesAsync(ct);
+}
+```
+
+典型使用场景：
+
+如果需要如下操作时：
+
+- 读取当前状态后做判断（比如：只有 Created 才能变 Paid）
+- 要触发领域逻辑（比如以后有更多字段要改、要计算）
+- 想要拿到“更新后的实体”（比如更新后返回给上层）
+
+因此当前的业务需要跟踪：`Pay` 需要判断是否重复支付。
+
+#### 写法 B：不查，直接更新（更高效，但要懂边界）
+
+当只想做“把某字段改成某值”，而且**不需要把整行数据先读出来**，就可以直接更新。
+
+EF Core 7+ 提供了非常适合“直接更新”的方法：`ExecuteUpdateAsync`（它会直接生成 UPDATE SQL）。
+
+实例代码：直接 UPDATE
+
+```csharp
+public async Task<bool> UpdateStatusDirectAsync(int id, string status, CancellationToken ct)
+{
+    ct.ThrowIfCancellationRequested();
+
+    var affected = await db.Orders
+        .Where(x => x.Id == id)
+        .ExecuteUpdateAsync(setters => setters
+            .SetProperty(o => o.Status, status), ct);
+
+    return affected > 0;
+}
+```
+
+直接更新这有什么好处？
+
+- **不会先 SELECT**
+- 数据量大/并发高时更省资源
+- 非常适合：批量更新、简单字段更新
+
+典型使用场景：
+
+当需要：像“后台批量把某些订单状态改成 X”这种场景
+
+
+
+### 5. 代码实例
+
+Pay 的两种实现对比
+
+#### 版本 1（当前的版本）
+
+Service 里：
+
+- `GetByIdAsync` 查
+- 判断状态
+- `UpdateStatusAsync` 改 + SaveChanges
+
+这符合前面“业务规则与数据访问分离”的结构（Service 做判断，Repo 做存取）。
+
+#### 版本 2（Repo 直接更新 + 返回影响行数）
+
+如果想让 Repo 更高效，可以让 Repo 暴露一个“直接更新”的方法，返回 bool：
+
+```csharp
+Task<bool> UpdateStatusDirectAsync(int id, string status, CancellationToken ct);
+```
+
+Repo 内部用 `ExecuteUpdateAsync`，Service 仍负责业务判断。
+
+但注意：Service 若需要判断“已支付”，仍要先查一次——这条 SELECT 是业务需要，省不了。
+
+
+
+### 6. 如何验证
+
+验证的目标不是功能，而是**确认理解EF 更新规则**：
+
+#### 验证 1：加上 `AsNoTracking()` 后，改属性不再更新
+
+- 在 Repo 的 `GetByIdAsync` 故意加 `AsNoTracking()`
+- 然后用“先查再改”的方式更新
+- 你会发现 `SaveChanges` 不会产生 UPDATE（或者更新无效）
+
+#### 验证 2：直接更新方法不会触发 SELECT
+
+- 用 `ExecuteUpdateAsync`
+- 打开 EF Core SQL 日志（它只会发 UPDATE）
+
+
+
+### 7. 本章小结
+
+1. **为什么改属性 + SaveChanges 能更新？**
+
+    因为实体被 DbContext 跟踪，Change Tracker 发现属性变了。
+
+2. **为什么有时不更新？**
+
+    常见是 `AsNoTracking()` 或者对象从来没被 DbContext 追踪。
+
+3. **什么时候必须先查？什么时候可以直接更新？**
+
+    - 需要业务判断/需要实体数据：先查再改
+    - 只是简单字段更新/批量更新：直接 UPDATE 更高效
+
+**新的问题？**
+
+现在可以“查得对（下推）”和“改得对（更新机制）”了。
+
+但是问题是：
+
+在service里使用repository查询的结果时，try catch捕获异常的使用在每个方法中，随着Action的增多，这样的处理方式不合理。
+
+因此需要解决：查询结果异常的全局处理
+

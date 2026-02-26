@@ -16,9 +16,7 @@ public class OrderService(IOrderRepository repo)
 
     public async Task<Order> PayAsync(int id, CancellationToken cancellationToken)
     {
-        var order = await repo.GetByIdAsync(id, cancellationToken);
-        if (order is null)
-            throw new OrderNotFoundException(id);
+        var order = await repo.GetByIdAsync(id, cancellationToken)?? throw new OrderNotFoundException(id);
         if (order.Status == "Paid")
             throw new OrderConflictException($"Order {id} was already paid");
         await repo.UpdateStatusAsync(id, "Paid", cancellationToken);

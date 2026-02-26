@@ -9,4 +9,5 @@ public interface IOrderRepository
     Task<Order?> GetByIdAsync(int id, CancellationToken cancellationToken);
     Task<Order> AddAsync(decimal amount, CancellationToken cancellationToken);
     Task UpdateStatusAsync(int id, string status, CancellationToken cancellationToken);
+    
 }

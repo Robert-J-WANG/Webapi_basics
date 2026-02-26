@@ -20,7 +20,7 @@ public class EfOrderRepository(AppDbContext db) : IOrderRepository
         if (!string.IsNullOrWhiteSpace(query.Status))
         {
             var status = query.Status.Trim();
-            result = result.Where(o => o.Status == status); 
+            result = result.Where(o => o.Status == status);
         }
 
         // 2) 排序
@@ -31,8 +31,8 @@ public class EfOrderRepository(AppDbContext db) : IOrderRepository
         result = sortBy switch
         {
             "amount" => desc ? result.OrderByDescending(x => x.Amount) : result.OrderBy(x => x.Amount),
-            "id"     => desc ? result.OrderByDescending(x => x.Id)     : result.OrderBy(x => x.Id),
-            _        => result.OrderBy(x => x.Id)
+            "id" => desc ? result.OrderByDescending(x => x.Id) : result.OrderBy(x => x.Id),
+            _ => result.OrderBy(x => x.Id)
         };
 
         // 3) 分页
@@ -43,7 +43,6 @@ public class EfOrderRepository(AppDbContext db) : IOrderRepository
         result = result.Skip((page - 1) * pageSize).Take(pageSize);
 
         return await result.ToListAsync(cancellationToken);
-
     }
 
     public async Task<Order?> GetByIdAsync(int id, CancellationToken cancellationToken)
@@ -72,13 +71,20 @@ public class EfOrderRepository(AppDbContext db) : IOrderRepository
     public async Task UpdateStatusAsync(int id, string status, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var order = await db.Set<Order>()
-            .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
-
-        if (order is null)
-            return;
-
-        order.Status = status;
+        var order = await GetByIdAsync(id, cancellationToken);
+        order!.Status = status;
         await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task<bool> UpdateStatusDirectAsync(int id, string status, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        var affected = await db.Orders
+            .Where(x => x.Id == id)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(o => o.Status, status), ct);
+
+        return affected > 0;
     }
 }
