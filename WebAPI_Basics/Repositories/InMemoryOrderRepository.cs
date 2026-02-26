@@ -21,7 +21,7 @@ public class InMemoryOrderRepository : IOrderRepository
         }
     ];
 
-    public Task<List<Order>> GetAllAsync(CancellationToken cancellationToken)
+    public Task<List<Order>> GetAllAsync(OrderQueryRequest request,CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         

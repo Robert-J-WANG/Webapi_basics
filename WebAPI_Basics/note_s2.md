@@ -954,7 +954,7 @@ EF Core已经帮我们封装好了一个方法 `Set<T>()` ,
 
 这一章只完成“切仓储”，不处理查询过滤/排序/分页。
 
-------
+
 
 ### 5. 实现步骤
 
@@ -1076,3 +1076,218 @@ builder.Services.AddScoped<IOrderRepository, EfOrderRepository>();
 
 因此，需要解决：如何把过滤/排序/分页这些查询动作放到数据库侧执行，而不是先取全量数据再处理。
 
+
+
+## 5. 查询下推
+
+### 1. 解决什么问题？
+
+现在 `EfOrderRepository.GetAllAsync` 是直接把整张 `Orders` 表 `ToListAsync()` 拉回内存，然后再由上层Service去做过滤/排序/分页操作。
+
+这样意味着：
+
+- 数据库里有 10 万条订单
+- 只想看第一页 20 条
+- 但仓储仍然会把 10 万条全取回来，再在内存里 `Skip/Take`
+
+问题不在“能不能跑”，而在“做法不对”：
+
+- 读了大量不需要的数据
+- 网络传输、内存、CPU 都浪费
+- 数据越多越明显
+
+因此，既然数据在数据库里，就应该让数据库完成过滤/排序/分页，而不是先把全量数据拉回内存再处理。
+
+
+
+### 2. 仓储要怎么“表达查询”？
+
+仓储里需要有一个对象，它具有“可继续拼条件”的查询能力IQueryable。
+
+大部分常见的集合，比如`List<T>`类型的对象，都有`IQueryable` , 即能链式调用LINQ扩展方法，但这些都是在操作内存中的数据。
+
+而我们需要一个新的类型，具备`IQueryable`， 并且能操作数据库里的数量。
+
+**EF core提供了这个类型`DbSet<T>`**：
+
+- 是 调用`Set<>()`方法的返回值类型
+- 表示T类型在数据库上数据表数据记录的集合 - 比如，就是数据库上的order的那张表
+- 提供 `IQueryable<T>`，让后面的 `Where/OrderBy/Skip/Take` 继续组合
+- 提供对数据记录进行修改的能力
+
+也就是说，在数据库上下文中，我们通过`Set<Order>()`方法创建的表格（类型就是`DbSet<Order>`), 这个表格对象就可以先执行LINQ操作（EFcore会转化为实际的SQL语句操作），最后转换为List， 返回到内存中，给上层的service使用。
+
+
+
+### 4. 如何操作？
+
+1. 数据库上下文对象中，申明Order数据表格对象
+
+1. 把“查询条件”传进仓储（让仓储知道要怎么查）
+
+2. 在仓储里从 `DbSet<Order>` 开始拼查询，再 `ToListAsync()`
+
+3. 上层不再对全量结果做过滤/排序/分页
+
+    
+
+### 5. 实现步骤
+
+#### 5.1 在 `AppDbContext` 里申明 `DbSet<Order>`表格对象
+
+`Data/AppDbContext.cs`：
+
+```csharp
+using Microsoft.EntityFrameworkCore;
+using WebAPI_Basics.Domain;
+
+namespace WebAPI_Basics.Data;
+
+public class AppDbContext : DbContext
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+
+    public DbSet<Order> Orders => Set<Order>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // 映射配置保持不变
+        base.OnModelCreating(modelBuilder);
+        // ...
+    }
+}
+```
+
+#### 5.2 让仓储接收查询条件
+
+修改接口`IOrderRepository`：
+
+能接收 `OrderQueryRequest query`
+
+```csharp
+Task<List<Order>> GetAllAsync(OrderQueryRequest query, CancellationToken cancellationToken);
+```
+
+#### 5.3 在 `EfOrderRepository` 里拼查询并下推
+
+核心点：**从 `db.Orders` 开始，先得到 `IQueryable<Order>`，再按条件逐步拼，最后 `ToListAsync()`。**
+
+`Repositories/EfOrderRepository.cs`：
+
+```csharp
+public class EfOrderRepository(AppDbContext db) : IOrderRepository
+{
+    public async Task<List<Order>> GetAllAsync(OrderQueryRequest query, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        // 拿到数据表数据集合对象
+        DbSet<Order> orders = db.Orders;
+
+        // 执行查询过滤的操作
+        // 定义一个变量来保存链式查询的结果
+        IQueryable<Order> result = orders; // 初始化一下，防止为空
+        // 1) 过滤
+        if (!string.IsNullOrWhiteSpace(query.Status))
+        {
+            var status = query.Status.Trim();
+            result = result.Where(o => o.Status == status); 
+        }
+
+        // 2) 排序
+        var sortBy = query.SortBy?.Trim().ToLowerInvariant();
+        var sortDir = query.SortDir?.Trim().ToLowerInvariant();
+        var desc = sortDir == "desc";
+
+        result = sortBy switch
+        {
+            "amount" => desc ? result.OrderByDescending(x => x.Amount) : result.OrderBy(x => x.Amount),
+            "id"     => desc ? result.OrderByDescending(x => x.Id)     : result.OrderBy(x => x.Id),
+            _        => result.OrderBy(x => x.Id)
+        };
+
+        // 3) 分页
+        var page = query.Page < 1 ? 1 : query.Page;
+        var pageSize = query.PageSize < 1 ? 20 : query.PageSize;
+        pageSize = Math.Min(pageSize, 100);
+
+        result = result.Skip((page - 1) * pageSize).Take(pageSize);
+		
+        // 查询的结果转List
+        return await result.ToListAsync(cancellationToken);
+
+    }
+
+   // 其他方法
+}
+```
+
+**注意**：
+
+- 数据库原表格对象 `DbSet<Order> orders = db.Orders;`不能改变，因为是查询
+- `IQueryable`调用链式LINQ操作的对象可以变，初始值赋值于`DbSet<Order> orders = db.Orders`
+- 之后所以的查询结果都基于新的变量`result`, 而不是数据库原表格对象`orders`
+- 最后被转换成List的对象，也是那个新的变量
+
+到这里，下推就完成了：Where/OrderBy/Skip/Take 都会进 SQL，数据库只返回“需要的那一页”。
+
+#### 5.4 修改service层
+
+```c#
+public class OrderService(IOrderRepository repo)
+{
+    public async Task<List<Order>> GetAllAsync(OrderQueryRequest query, CancellationToken cancellationToken)=>await repo.GetAllAsync(query,cancellationToken);
+
+    public async Task<Order> GetByIdAsync(int id, CancellationToken cancellationToken) =>
+        await repo.GetByIdAsync(id, cancellationToken) ?? throw new OrderNotFoundException(id);
+
+    public async Task<Order> CreateAsync(OrderCreateRequest request, CancellationToken cancellationToken) =>
+        await repo.AddAsync(request.Amount, cancellationToken);
+
+    public async Task<Order> PayAsync(int id, CancellationToken cancellationToken)
+    {
+        var order = await repo.GetByIdAsync(id, cancellationToken);
+        if (order is null)
+            throw new OrderNotFoundException(id);
+        if (order.Status == "Paid")
+            throw new OrderConflictException($"Order {id} was already paid");
+        await repo.UpdateStatusAsync(id, "Paid", cancellationToken);
+        return order;
+    }
+}
+```
+
+
+
+### 6. 如何验证？
+
+验证目标：**同样的接口功能，但不再全表读取。**
+
+#### 验证 1：分页行为正确
+
+- 先插入多条订单（比如 30 条）
+- 请求 `Page=1, PageSize=10` 返回 10 条
+- 请求 `Page=2, PageSize=10` 返回另一批 10 条
+- 请求 `Page=3, PageSize=10` 返回最后 10 条
+
+#### 验证 2：过滤/排序行为正确
+
+- `Status=Paid` 只返回 Paid 的订单
+
+- `SortBy=amount&SortDir=desc` 金额从大到小
+
+    
+
+### 7. 本章小结
+
+这一章做的事很单一：
+
+- 过去：仓储全表 `ToListAsync()`，上层在内存处理查询
+- 现在：仓储从 `DbSet<Order>`（`db.Orders`）开始拼查询，把过滤/排序/分页下推到数据库，然后才执行 `ToListAsync()`
+
+**新的问题来了？**
+
+现在查询已经更像数据库该有的样子了，但更新逻辑还比较“靠直觉”：
+
+- 为什么有时改了属性 `SaveChanges` 就会更新？
+- 为什么有时又不会？
+- 什么时候需要先查出来？什么时候可以更直接更新？
