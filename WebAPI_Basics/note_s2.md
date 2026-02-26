@@ -886,3 +886,193 @@ dotnet ef database update
 
 因此，需要解决：如何把 `IOrderRepository` 从内存实现切换到数据库实现？
 
+
+
+## 4. EF Core Repository
+
+### 1. 解决什么问题？
+
+第3章已经把 `Orders` 表建出来了。
+
+但现在接口读写订单的主线仍然走内存仓储：
+
+- 数据库有表
+- API 还没真正用数据库
+
+这一章要解决：在不改 `OrdersController -> OrderService` 的前提下，把 `IOrderRepository` 从内存实现切换为数据库实现。
+
+
+
+### 2. 使用新的Repository 
+
+第一阶段已经把数据库/存储细节放在 Repository 层收口了。现在要换数据库，本质上就是：
+
+- 上层（Controller/Service）不动
+- 只替换 `IOrderRepository` 的实现
+
+仓储的核心任务是两类：
+
+- **写入**：创建订单、更新订单
+- **读取**：按 id 查订单、列出订单
+
+**如果在仓储里直接写 SQL：**
+
+EF Core 提供的 `Database.ExecuteSqlRawAsync(...)` 方法去执行 `INSERT/UPDATE`。
+
+它能做“写入”，但马上会卡在“读取”：
+
+- `GetById` / `GetAll` 的逻辑需要把结果读出，来并映射成 `Order`
+- 而`ExecuteSqlRaw` 不返回实体结果集
+
+想要拿到结果，需要写 `DbCommand`、读 `DataReader`、手动映射等等复杂繁琐的操作。
+
+因此，我们需要一个东西，能更优雅地执行上述的逻辑操作，并能返回操作后的数据结构。
+
+
+
+### 3. 仓储的 “Order 的数据入口”
+
+EF Core已经帮我们封装好了一个方法 `Set<T>()` ,
+
+`**Set<T>()**`帮我们完成两件事：
+
+- 把查询翻译成 SQL（不用手写 SQL）
+- 把结果映射成 `Order` 对象（不用手写映射）
+
+调用这个方法之后，我们可以得到执行SQL语句后的数据表里数据集。
+
+
+
+### 4. 如何操作？
+
+顺序只有四步：
+
+1. 新增数据库仓储 `EfOrderRepository`
+2. 用 `AppDbContext` 实现最基本的 `GetAll/GetById/Add/Update`
+3. 在 DI 里把 `IOrderRepository` 切换为 `EfOrderRepository`
+4. 用现有接口验证：数据来自数据库且可持久化
+
+这一章只完成“切仓储”，不处理查询过滤/排序/分页。
+
+------
+
+### 5. 实现步骤
+
+#### 5.1 新建 `EfOrderRepository`
+
+新建文件：`Repositories/EfOrderRepository.cs`
+
+```csharp
+public class EfOrderRepository(AppDbContext db) : IOrderRepository
+{
+    public async Task<List<Order>> GetAllAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return await db.Set<Order>().ToListAsync(cancellationToken);
+    }
+
+    public async Task<Order?> GetByIdAsync(int id, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return await db.Set<Order>().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+    }
+
+    public async Task<Order> AddAsync(decimal amount, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        // EF + SQL Server 会自动生成 Id（Identity）
+        var order = new Order
+        {
+            Amount = amount,
+            Status = "Created"
+        };
+
+        await db.Set<Order>().AddAsync(order, cancellationToken);
+        await db.SaveChangesAsync(cancellationToken);
+        // SaveChanges 后 order.Id 会被填上
+        return order;
+    }
+
+    public async Task UpdateStatusAsync(int id, string status, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var order = await db.Set<Order>().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+
+        if (order is null)
+            return;
+
+        order.Status = status;
+        await db.SaveChangesAsync(cancellationToken);
+    }
+}
+```
+
+**核心方法：**
+
+```csharp
+_db.Set<Order>()
+```
+
+它就是“拿到 Order 这类数据入口”的方法。
+
+后面的 `ToListAsync / FirstOrDefaultAsync / AddAsync` 都是EF core内置的扩展方法。
+
+#### 5.2 在 DI 中切换仓储实现
+
+在 `Program.cs` 里，把原来内存仓储的注册换成 EF 版：
+
+```csharp
+builder.Services.AddScoped<IOrderRepository, EfOrderRepository>();
+```
+
+
+
+### 6. 如何验证？
+
+验证目标是两件事：
+
+- 接口行为不变（Controller/Service 没改）
+- 数据真的来自数据库（可持久化）
+
+#### 验证 1：创建订单后重启项目，数据还在
+
+1. `POST /orders` 创建订单
+2. 停止项目再启动
+3. `GET /orders` 还能查到刚才的订单
+
+如果这成立，就说明已经从内存切到数据库。
+
+#### 验证 2：支付后状态能持久化
+
+1. 创建订单（状态 `Created`）
+2. 调用 `pay`
+3. 再次 `GET /orders/{id}`，看到状态为 `Paid`
+4. 重启项目后再查一次，状态仍为 `Paid`
+
+如果这成立，说明更新也真正落在数据库。
+
+
+
+### 7. 本章小结
+
+这一章只完成一件事：
+
+- 新增 `EfOrderRepository`
+- 用 `AppDbContext` 做最基本的增删改查中的“查/增/改”
+- DI 切换 `IOrderRepository` 的实现
+- 上层主线保持不变
+
+到这里，API 已经真正开始使用数据库持久化订单数据。
+
+**新的问题来了？**
+
+现在 `GetAll` 是直接把整张 `Orders` 表全部取出来，再由上层去处理过滤/排序/分页。
+
+这在使用内存的Repository时，不影响，反正都是内存在处理。
+
+但使用数据库后，如果数据量一大就不合理。
+
+数据库想不内存，有更强大的能力来处理数据。
+
+因此，需要解决：如何把过滤/排序/分页这些查询动作放到数据库侧执行，而不是先取全量数据再处理。
+

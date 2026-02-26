@@ -25,10 +25,9 @@ public class Program
         
         // 注册我们自己的类型模型依赖
         builder.Services.AddScoped<OrderService>();
-        builder.Services.AddScoped<IOrderRepository,InMemoryOrderRepository > ();
-       
+        // builder.Services.AddScoped<IOrderRepository,InMemoryOrderRepository > ();
         // builder.Services.AddScoped<IOrderRepository,SqlServerOrderRepository > ();
-        
+        builder.Services.AddScoped<IOrderRepository, EfOrderRepository>();
         // 注册数据库
         builder.Services.AddDbContext<AppDbContext>(options =>options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
         
