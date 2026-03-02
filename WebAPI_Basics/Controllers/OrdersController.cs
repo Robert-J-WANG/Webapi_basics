@@ -21,15 +21,8 @@ public class OrdersController(OrderService service) : ControllerBase
     [HttpGet("{id:int}")]
     public async Task<ActionResult<OrderResponse>> GetById(int id, CancellationToken cancellationToken)
     {
-        try
-        {
-            var order = await service.GetByIdAsync(id, cancellationToken);
-            return Ok(ToResponse(order));
-        }
-        catch (OrderNotFoundException)
-        {
-            return NotFound();
-        }
+        var order = await service.GetByIdAsync(id, cancellationToken);
+        return Ok(ToResponse(order));
     }
 
     [HttpPost]
@@ -49,19 +42,8 @@ public class OrdersController(OrderService service) : ControllerBase
     [HttpPost("{id:int}/pay")]
     public async Task<ActionResult<OrderResponse>> Pay(int id, CancellationToken cancellationToken)
     {
-        try
-        {
-            var order = await service.PayAsync(id, cancellationToken);
-            return Ok(ToResponse(order));
-        }
-        catch (OrderNotFoundException)
-        {
-            return NotFound();
-        }
-        catch (OrderConflictException ex)
-        {
-            return Conflict(new { message = ex.Message });
-        }
+        var order = await service.PayAsync(id, cancellationToken);
+        return Ok(ToResponse(order));
     }
 
 

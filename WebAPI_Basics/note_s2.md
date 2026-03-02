@@ -1298,7 +1298,7 @@ public class OrderService(IOrderRepository repo)
 
 
 
-## 第6章：EF Core 更新机制
+## 6. EF Core 更新机制
 
 ### 1. 解决什么问题？
 
@@ -1522,7 +1522,338 @@ Repo 内部用 `ExecuteUpdateAsync`，Service 仍负责业务判断。
 
 但是问题是：
 
-在service里使用repository查询的结果时，try catch捕获异常的使用在每个方法中，随着Action的增多，这样的处理方式不合理。
+当客户端发送http请求时，如果请求异常，当前我们在controller里的每个action里通过catch捕获的。但时随着Action的增多，这样的处理方式不合理。
 
-因此需要解决：查询结果异常的全局处理
+因此需要解决：查询结果异常的全局处理。
 
+
+
+## 7. middleWare - 全局异常处理
+
+### 1. 解决什么问题？
+
+当前的API， Service 抛业务异常，Controller catch 后映射成 HTTP 404/409。
+
+这在少量接口时没问题，但当接口变多，会出现这种重复结构：
+
+- 每个 Action 都写一段 try/catch
+- 每段里面都是“把业务异常翻译成状态码”的同一套逻辑
+
+这就导致如下问题：
+
+- **重复**：每个 Action 复制粘贴，维护成本高
+- **不一致**：今天忘了写一个 catch，就可能变成 500
+- **Controller 变厚**：HTTP 输入输出之外塞满错误映射代码
+
+因此，需要解决的是：
+
+**让 Controller 不再写 try/catch，而是把“异常 → HTTP 响应”的翻译放到一个统一的位置。**
+
+
+
+### 2. 一次请求的真实流程
+
+要把 try/catch 从每个 Action 移走，就必须回答一个问题：
+
+- **如果 Controller 不 catch，那异常谁来 catch？**
+
+先要明确一下对于一次请求来说：
+
+- 请求是如何到Controller的？
+- 到Controller层之后又会去哪里？
+- 它是真实流程是什么？
+
+#### 1.  请求是怎么来的？
+
+- Scalar 在浏览器里通过 URL 发请求（例如 `https://localhost:5001/...`）
+- 这个 URL 对应本机上一个正在监听的服务端：**Kestrel**
+
+#### 2. Kestrel 做了什么？
+
+Kestrel 是框架自带的默认的 Web API 宿主服务器，它负责：
+
+- 监听 host:port
+- 接收 HTTP 请求
+- **为每次请求创建/准备一个 `HttpContext`**（这次请求的“上下文容器”）
+- 把 `HttpContext` 交给 ASP.NET Core 的处理流水线
+- 最后把响应发回给浏览器（Scalar）
+
+#### 3. 请求管道（Pipeline）是什么？
+
+Kestrel 把 `HttpContext` 交给 ASP.NET Core 之后，不是立刻进 Controller，而是先走：
+
+**一串中间件（Middleware）组成的管道**
+
+可以把中间件理解成很多个“同样形状的函数”，每个都长这样：
+
+```text
+Middleware(context):
+  1) 做点前置工作
+  2) await next(context)  // 把请求交给下一环（最终到 Controller）
+  3) 做点后置工作
+```
+
+关键句就是：`await next(context)`
+
+它让中间件成为“洋葱模型”——外层包着内层。
+
+------
+
+#### 4. 中间件为什么能替代 Controller 的 try/catch？
+
+现在看到了“Controller 上面是谁”：
+
+- Controller 是管道深处的某个终点（Endpoint）
+- 它外面包着一层又一层中间件
+
+所以如果我们想把 try/catch 从每个 Action 收口到一个地方，最佳位置就是：
+
+> **在管道里靠前的某个中间件里，用 try/catch 包住 `await next(context)`**
+
+为什么这样就能“全局”？
+
+因为 `next(context)` 代表“后面所有步骤”：
+
+- 后续中间件
+- 路由匹配
+- Controller Action
+- Action 里调用的 Service/Repo/EF
+
+于是：
+
+- Service 抛异常
+- 沿调用链冒泡到 Controller（Controller 不 catch）
+- 再冒泡回到外层中间件的 try/catch
+- 被统一处理
+
+这就实现了：**Controller 的 try/catch 消失，但异常仍然能接住**。
+
+------
+
+#### 5. catch 到异常后，怎么返回 HTTP 响应？
+
+**HTTP 响应是只在Controller 层吗？**
+
+按管道模型：
+
+- 响应最终是通过 `HttpContext.Response` 写出的
+- **中间件也拿到了 HttpContext**
+- 所以中间件同样可以设置：
+    - `StatusCode = 404/409`
+    - 写入 body（简单文本即可）
+- 请求结束后，Kestrel 会把 `HttpContext.Response` 发送回浏览器
+
+所以：Controller 只是“写响应的一种方式”，不是唯一方式。
+
+“真正发送”由 Kestrel 完成，使用时我们只是在Controller/中间件里只是把 Response 填好。
+
+
+
+### 3. 异常生命周期
+
+以“支付不存在订单”为例，抛出一个异常的全流程：
+
+1. Scalar（浏览器）访问 URL → 发送请求
+2. Kestrel 接到请求 → 创建/准备 HttpContext
+3. 请求进入管道 → 先到全局异常处理中间件（外层）
+4. 中间件执行 `await next(context)` → 请求继续深入，到 Controller → Service
+5. Service 查不到订单 → throw `OrderNotFoundException`
+6. 异常冒泡：Service → Controller（没 catch）→ 回到中间件 catch
+7. 中间件写 `HttpContext.Response.StatusCode = 404` 并写 body
+8. 管道结束 → Kestrel 把 Response 发送回 Scalar
+9. Scalar 显示 404
+
+
+
+### 4. 如何操作
+
+#### 1. 创建全局异常处理中间件
+
+核心结构只有一句话：
+
+> **try { await next(context); } catch { 写 Response }**
+
+```csharp
+public sealed class GlobalExceptionMiddleware(RequestDelegate next)
+{
+    public async Task InvokeAsync(HttpContext context)
+    {
+        try
+        {
+            // 关键：next(context) 代表后续全部流程（路由、Controller、Service、Repo/EF）
+            await next(context);
+        }
+        catch (OrderNotFoundException ex)
+        {
+            await WritePlainErrorAsync(context, HttpStatusCode.NotFound, ex.Message);
+        }
+        catch (OrderConflictException ex)
+        {
+            await WritePlainErrorAsync(context, HttpStatusCode.Conflict, ex.Message);
+        }
+        catch (Exception)
+        {
+            //最小可用兜底异常
+            await WritePlainErrorAsync(context, HttpStatusCode.InternalServerError, "Unexpected error.");
+        }
+    }
+
+    private static async Task WritePlainErrorAsync(HttpContext context, HttpStatusCode status, string message)
+    {
+        // 如果响应已经开始写（header/body 已部分输出），就不要再强行改状态码
+        if (context.Response.HasStarted) return;
+
+        context.Response.Clear();
+        context.Response.StatusCode = (int)status;
+        context.Response.ContentType = "text/plain; charset=utf-8";
+        await context.Response.WriteAsync(message);
+    }
+}
+```
+
+**几点说明：**
+
+- `HttpContext`：Kestrel 每个请求创建/准备一个，贯穿整个管道
+- `await next(context)`：把请求交给后续处理并等待返回
+- `try/catch 包住 next`：就能“全局”接住后续任何 throw
+- 中间件写 `context.Response`：响应不是 Controller 专属；最终由 Kestrel 发送回客户端
+
+#### 2. 接入管道：使用中间件
+
+**注意放置顺序。**
+
+把它注册在 `MapControllers()` 之前，这样它才能“罩住” Controller。
+
+```c#
+
+using Microsoft.EntityFrameworkCore;
+using WebAPI_Basics.Data;
+using WebAPI_Basics.Middlewares;
+using WebAPI_Basics.Repositories;
+using WebAPI_Basics.Services;
+
+namespace WebAPI_Basics;
+
+using Scalar.AspNetCore;
+
+public class Program
+{
+    public static void Main(string[] args)
+    {
+        ...
+        
+        // 全局异常处理中间件：放在 MapControllers 之前，才能罩住 Controller/Service
+        app.UseMiddleware<GlobalExceptionMiddleware>();
+
+        app.MapControllers();
+        app.Run();
+    }
+}
+```
+
+#### 3. 修改Controller ：删除 try/catch
+
+```c#
+[ApiController]
+[Route("[controller]")]
+public class OrdersController(OrderService service) : ControllerBase
+{
+    [HttpGet]
+    public async Task<ActionResult<List<OrderResponse>>> GetAll([FromQuery] OrderQueryRequest query,
+        CancellationToken cancellationToken)
+    {
+        var result = (await service.GetAllAsync(query, cancellationToken)).Select(ToResponse).ToList();
+        return Ok(result);
+    }
+
+    [HttpGet("{id:int}")]
+    public async Task<ActionResult<OrderResponse>> GetById(int id, CancellationToken cancellationToken)
+    {
+        var order = await service.GetByIdAsync(id, cancellationToken);
+        return Ok(ToResponse(order));
+    }
+
+    [HttpPost]
+    public async Task<ActionResult<OrderResponse>> Create(OrderCreateRequest request,
+        CancellationToken cancellationToken)
+    {
+        var order = await service.CreateAsync(request, cancellationToken);
+        var response = ToResponse(order);
+
+        return CreatedAtAction(
+            nameof(GetById),
+            new { id = response.Id },
+            response
+        );
+    }
+
+    [HttpPost("{id:int}/pay")]
+    public async Task<ActionResult<OrderResponse>> Pay(int id, CancellationToken cancellationToken)
+    {
+        var order = await service.PayAsync(id, cancellationToken);
+        return Ok(ToResponse(order));
+    }
+
+    //辅助方法： 把OrderItem转换成OrderResponse
+    private OrderResponse ToResponse(Order order)
+    {
+        return new OrderResponse
+        {
+            Id = order.Id,
+            Amount = order.Amount,
+            Status = order.Status,
+        };
+    }
+}
+```
+
+Controller 现在只写“正常路径”：
+
+- 调用 service
+- 返回 Ok/Created
+- 不再负责翻译异常
+
+**注意：要求 Service 继续用 `throw` 表达业务失败，否则就没有“全局异常映射”的输入。**
+
+
+
+### 5. 如何验证
+
+#### 验证1：支付不存在订单 → 404
+
+- 调 `POST /orders/999999/pay`
+- Service 抛 `OrderNotFoundException`
+- Controller 不 catch → 异常冒泡
+- 中间件 catch → 写 `StatusCode=404`
+- Scalar 收到 404
+
+#### 验证2：重复支付 → 409
+
+- 同订单支付两次
+- 第二次 Service 抛 `OrderConflictException`
+- 中间件映射为 409
+
+#### 验证3：Controller 里 “await 后面的代码不会执行”
+
+Controller `await` 后加一行（断点/日志），发生异常时不会执行到，证明异常不是返回值，而是控制流跳转到外层 catch。
+
+
+
+### 6. 本章小结
+
+现在API已经完成：
+
+1. 使用中间件对**异常翻译集中管理**：404/409/500 规则统一
+2. **Controller 变薄**：只写 HTTP + 调用
+
+**有什么新的问题？**
+
+现在状态码统一了，但会发现：
+
+- 业务异常：中间件返回的是 plain text
+- 参数验证错误（[ApiController] + DataAnnotations）：默认返回另一种 JSON 结构
+- 未知异常：又是第三种风格
+
+这会导致客户端处理很麻烦。
+
+因此还需要解决：**统一错误响应结构（ProblemDetails）**，让“错误结构稳定”跟“状态码正确”一样成为默认。

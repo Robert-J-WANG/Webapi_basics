@@ -1,6 +1,7 @@
 
 using Microsoft.EntityFrameworkCore;
 using WebAPI_Basics.Data;
+using WebAPI_Basics.Middlewares;
 using WebAPI_Basics.Repositories;
 using WebAPI_Basics.Services;
 
@@ -60,6 +61,10 @@ public class Program
 
         // 启用授权中间件（Authorization），拦截请求并校验声明（Claims）以进行访问控制。
         app.UseAuthorization();
+        
+        
+        // 全局异常处理中间件：放在 MapControllers 之前，才能罩住 Controller/Service
+        app.UseMiddleware<GlobalExceptionMiddleware>();
 
         // 终结点路由映射：根据路由表将传入的 HTTP 请求分发至Controllers/ 目录下对应的 Action 方法。
         app.MapControllers();
