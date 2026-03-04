@@ -1,4 +1,5 @@
 using System.Net;
+using Microsoft.AspNetCore.Mvc;
 using WebAPI_Basics.Domain;
 
 namespace WebAPI_Basics.Middlewares;
@@ -9,32 +10,43 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next)
     {
         try
         {
-            // 关键：next(context) 代表后续全部流程（路由、Controller、Service、Repo/EF）
             await next(context);
         }
         catch (OrderNotFoundException ex)
         {
-            await WritePlainErrorAsync(context, HttpStatusCode.NotFound, ex.Message);
+            await WriteProblemAsync(context, StatusCodes.Status404NotFound, "Not Found", ex.Message);
         }
         catch (OrderConflictException ex)
         {
-            await WritePlainErrorAsync(context, HttpStatusCode.Conflict, ex.Message);
+            await WriteProblemAsync(context, StatusCodes.Status409Conflict, "Conflict", ex.Message);
         }
         catch (Exception)
         {
-            // 第9章再加 ILogger 记录细节；本章只做最小可用兜底
-            await WritePlainErrorAsync(context, HttpStatusCode.InternalServerError, "Unexpected error.");
+            await WriteProblemAsync(context, StatusCodes.Status500InternalServerError,
+                "Internal Server Error", "Unexpected error.");
         }
     }
 
-    private static async Task WritePlainErrorAsync(HttpContext context, HttpStatusCode status, string message)
+    private static async Task WriteProblemAsync(
+        HttpContext context,
+        int statusCode,
+        string title,
+        string detail)
     {
-        // 如果响应已经开始写（header/body 已部分输出），就不要再强行改状态码
         if (context.Response.HasStarted) return;
 
         context.Response.Clear();
-        context.Response.StatusCode = (int)status;
-        context.Response.ContentType = "text/plain; charset=utf-8";
-        await context.Response.WriteAsync(message);
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "application/problem+json; charset=utf-8";
+
+        var problem = new ProblemDetails
+        {
+            Status = statusCode,
+            Title = title,
+            Detail = detail,
+            Instance = context.Request.Path
+        };
+
+        await context.Response.WriteAsJsonAsync(problem);
     }
 }
