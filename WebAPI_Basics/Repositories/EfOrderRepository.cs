@@ -1,12 +1,15 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using WebAPI_Basics.Data;
 using WebAPI_Basics.Domain;
 using WebAPI_Basics.Dtos.Requests;
+using WebAPI_Basics.Options;
 
 namespace WebAPI_Basics.Repositories;
 
-public class EfOrderRepository(AppDbContext db) : IOrderRepository
+public class EfOrderRepository(AppDbContext db, IOptions<OrderApiOptions> options) : IOrderRepository
 {
+    private readonly OrderApiOptions _opt = options.Value;
     public async Task<List<Order>> GetAllAsync(OrderQueryRequest query, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -35,10 +38,11 @@ public class EfOrderRepository(AppDbContext db) : IOrderRepository
             _ => result.OrderBy(x => x.Id)
         };
 
+       
         // 3) 分页
         var page = query.Page < 1 ? 1 : query.Page;
-        var pageSize = query.PageSize < 1 ? 20 : query.PageSize;
-        pageSize = Math.Min(pageSize, 100);
+        var pageSize = query.PageSize < 1 ? _opt.DefaultPageSize: query.PageSize;
+        pageSize = Math.Min(pageSize, _opt.MaxPageSize);
 
         result = result.Skip((page - 1) * pageSize).Take(pageSize);
 

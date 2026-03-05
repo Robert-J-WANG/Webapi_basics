@@ -5,6 +5,7 @@ using WebAPI_Basics.Middlewares;
 using WebAPI_Basics.Repositories;
 using WebAPI_Basics.Services;
 using Scalar.AspNetCore;
+using WebAPI_Basics.Options;
 
 namespace WebAPI_Basics;
 
@@ -25,10 +26,8 @@ public class Program
         // 异常处理的组件
         builder.Services.AddProblemDetails();
         builder.Services.AddExceptionHandler<OrderExceptionHandler>();
-
-
+        
         //配置日志输出 Trace 信息
-
         builder.Logging.Configure(options =>
         {
             options.ActivityTrackingOptions =
@@ -40,6 +39,8 @@ public class Program
         // 能让service获取HttpContext
         // builder.Services.AddHttpContextAccessor();
 
+        // 注册配置对象OrderApiOptions，并绑定配置参数OrderApi
+        builder.Services.Configure<OrderApiOptions>(builder.Configuration.GetSection("OrderApi"));
 
         // 注册我们自己的类型模型依赖
         builder.Services.AddScoped<OrderService>();

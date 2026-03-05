@@ -2857,3 +2857,288 @@ public class OrderService(
 > **配置管理：appsettings + Options**
 
 也就是：把那些“会变化的参数”从代码里抽出去，放到配置里统一管理。
+
+
+
+下面我把第10章**重新生成**成更“顺滑”的学习笔记：
+**每个概念都必须有前因后果**——先出现问题 → 解释为什么会这样 → 引出概念 → 再落到代码与验证。不会突然冒出一个新名词就开始写代码。
+
+
+
+## 10. 配置管理
+
+### 1. 解决什么问题？
+
+到第9章为止，我们的项目已经具备“真实项目的骨架”：数据库、异常收口、ProblemDetails、日志。
+
+但现在代码里还有很多**写死（hard-code）**的东西，比如：
+
+- 数据库连接字符串（换环境就要改代码/容易泄露）
+- 分页默认值、最大 PageSize（产品改规则就要改代码再发版）
+- 日志级别（开发想看多一点，生产想更克制
+
+因此，本章要解决的核心问题：
+
+**把“会变的参数”从代码里拿出去，用配置管理。**
+
+
+
+### 2. 什么是配置？
+
+配置就是程序运行时需要的一些“外部参数”：
+
+- 这些参数会变（按环境、按需求、按开关）
+- 但代码不应该跟着频繁变
+
+所以配置的目标是：
+
+**让程序“同一份代码”，在不同环境/不同规则下运行。**
+
+**ASP.NET Core 从哪里读配置？**
+
+最常见来源是两个 JSON 文件：
+
+- `appsettings.json`：默认配置（所有环境的“基线值”）
+- `appsettings.Development.json`：开发环境覆盖默认值（只在 Development 环境生效）
+
+一个重要的规则：
+
+- **更具体的配置会覆盖更通用的配置。**
+
+    比如： Development 文件会覆盖 appsettings.json 里的同名项。
+
+这就是为什么要有两个文件：
+
+默认值放基线，开发差异放 Development 覆盖。
+
+
+
+### 3. 如何读取配置？
+
+现在我们知道，配置时要把一些参数，比如 `DefaultPageSize / MaxPageSize` ，放到 appsettings。
+
+那么，使用时，**业务代码里怎么读配置？**
+
+框架已经内置了配置对象 `Builder.Configration`。 
+
+使用时，通过IConfiguration接口直接注入并拿到配置对象
+
+比如：
+
+```c#
+public class EfOrderRepository(AppDbContext db, IConfiguration config) : IOrderRepository
+{
+    // config就是全局配置对象
+}
+```
+
+读取配置参数时，直接使用配置对象内置的方法 `GetValue<T>`
+
+```c#
+public class EfOrderRepository(AppDbContext db, IConfiguration config) : IOrderRepository
+{
+    var defaultSize = config.GetValue<int>("OrderApi:DefaultPageSize");
+    var maxSize = config.GetValue<int>("OrderApi:MaxPageSize");
+    ...
+}
+```
+
+还有最原始的读法：用字符串 key：
+
+```csharp
+var defaultSize = config["OrderApi:DefaultPageSize"];
+var maxSize = config["OrderApi:MaxPageSize"];
+```
+
+这有明显缺点：
+
+- key 是字符串，写错不会报错，只会读不到
+- 值是 string，你还要自己转 int
+- 读配置的代码容易散落在各处（维护更难）
+
+因此需要对配置对象参数也要统一封装管理， 这就是**Options 模式**。
+
+
+
+### 4. Options 模式
+
+Options 模式：**把一组相关配置，绑定成一个强类型对象，然后通过 DI 注入使用。**
+
+它能解决上面的几个缺点：
+
+- 不再到处写字符串 key（集中在绑定那一处）
+- 不再手动转类型（int 就是 int）
+- 配置读取集中、结构清晰（像注入 Service 一样注入配置）
+
+也就说，把配置对象中的参数，也封装成一个类，这个类可以绑定到配置appsettings.json对应的实例中，使用时通过DI注入的方式。
+
+这样就能实现对配置参数的封装和统一管理。
+
+
+
+### 5. 代码实现
+
+本章只做一件最典型的配置化：**分页默认值/最大值**。
+
+数据库的连接字符串之前已经放 appsettings 里了，并通过 `Builder.Configration`获取，并传入AddDbContext
+
+```c#
+// 注册数据库
+builder.Services.AddDbContext<AppDbContext>(options =>
+	options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+```
+
+#### 5.1 把参数写进 appsettings
+
+**appsettings.json（基线值）**
+
+```json
+{
+...
+   
+  "ConnectionStrings": {
+    "DefaultConnection": "Server=localhost,1433;Database=WebApiBasicsDb;User Id=sa;Password=MYpwd123!;TrustServerCertificate=True;Encrypt=False"
+  },
+    
+  "OrderApi": {
+    "DefaultPageSize": 20,
+    "MaxPageSize": 100
+  }
+}
+
+```
+
+**appsettings.Development.json（开发覆盖，可选）**
+
+```json
+{
+  "OrderApi": {
+    "DefaultPageSize": 10,
+    "MaxPageSize": 200
+  }
+}
+```
+
+到这里只做了“把参数外移”，但还没让代码用上。
+
+#### 5.2 创建一个强类型 Options 类
+
+让配置参数“有类型”。
+
+**Options/OrderApiOptions.cs**
+
+```csharp
+namespace WebAPI_Basics.Options;
+
+public sealed class OrderApiOptions
+{
+    public int DefaultPageSize { get; init; } = 20;
+    public int MaxPageSize { get; init; } = 100;
+}
+```
+
+这一步使得：配置不再是字符串字典，而是一个“有字段、有类型”的对象
+
+#### 5.3 Program.cs 绑定配置
+
+把`appsettings.json`里的参数（字符串字典），绑定到Options 类中
+
+**Program.cs**
+
+```csharp
+using WebAPI_Basics.Options;
+
+builder.Services.Configure<OrderApiOptions>(
+    builder.Configuration.GetSection("OrderApi"));
+```
+
+这一步非常关键，它完成了：
+
+> ```
+> OrderApi:*` 这组配置 → 绑定到 `OrderApiOptions
+> ```
+
+绑定完成后，DI 就可以提供：
+
+- `IOptions<OrderApiOptions>`
+
+#### 5.4 使用配置参数
+
+在需要的地方注入 IOptions，使用Options类的实例使用
+
+**Repositories/EfOrderRepository.cs**
+
+```csharp
+using Microsoft.Extensions.Options;
+using WebAPI_Basics.Options;
+
+public class EfOrderRepository(AppDbContext db, IOptions<OrderApiOptions> options) : IOrderRepository
+{
+    private readonly OrderApiOptions _opt = options.Value;
+
+    public async Task<List<Order>> GetAllAsync(OrderQueryRequest query, CancellationToken ct)
+    {
+        IQueryable<Order> result = db.Orders;
+
+        // ... 过滤/排序保持不变
+        
+		// 3) 分页
+        var page = query.Page < 1 ? 1 : query.Page;
+
+        var pageSize = query.PageSize < 1
+            ? _opt.DefaultPageSize
+            : query.PageSize;
+
+        pageSize = Math.Min(pageSize, _opt.MaxPageSize);
+
+        result = result.Skip((page - 1) * pageSize).Take(pageSize);
+
+        return await result.ToListAsync(ct);
+    }
+}
+```
+
+到这里，本章目标就达成了：
+
+- 业务逻辑完全没变（分页规则不变）
+- 只是把“数字”从代码移到了配置
+
+
+
+### 6. 如何验证
+
+#### 验证1：改配置，不改代码，默认分页大小就变
+
+1. 把 `appsettings.Development.json` 的 `DefaultPageSize` 改成 5
+2. 请求 `GET /orders?page=1`（不传 pageSize）
+3. 预期：最多返回 5 条
+
+#### 验证2：最大 pageSize 上限受配置控制
+
+1. 把 `MaxPageSize` 改成 30
+2. 请求 `GET /orders?page=1&pageSize=9999`
+3. 预期：最多返回 30 条
+
+#### 验证3：Development 覆盖生效
+
+- 你在 Development 下跑，应该使用 Development 文件的值覆盖基线值
+
+
+
+### 7. 本章小结
+
+本章完成了“真实项目必备”的配置化能力：
+
+- 配置文件（appsettings / Development 覆盖）
+- 配置绑定（Options 模式）
+- 用 DI 注入配置
+- 用配置替换硬编码（分页默认值/最大值）
+
+**有什么新的问题？**
+
+api现在具体最基础的配置能力，但是遇到更多配置时，如何处理？
+
+比如：
+
+**如何做一个最小可用的 JWT 认证（登录签 Token + 保护接口），并把 JWT 参数配置化？**
+
