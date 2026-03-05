@@ -2175,3 +2175,685 @@ public sealed class OrderExceptionHandler : IExceptionHandler
 现在错误返回虽然统一，但当线上报错时，仍需要服务端记录关键流程与异常细节，才能定位问题。
 
 因此需要解决如何记录常信息的问题。
+
+
+
+## 9. 日志（ILogger）
+
+### 1. 解决什么问题？
+
+第8章我们已经解决了“错误响应结构不统一”的问题：
+
+- 业务异常返回 `ProblemDetails`
+- 验证错误默认返回 `ValidationProblemDetails`
+- 客户端拿到错误时，可以看到稳定的错误结构
+
+但是现在马上会出现一个新问题：
+
+**客户端虽然看到错误了，但服务端不好查**
+
+比如用户说：
+
+- “我刚刚支付失败了”
+- 错误响应里有一个 `traceId`
+
+这时后端真正关心的是：
+
+- 这次请求到底走到哪一步了？
+- 是在哪一层失败的？Controller、Service、Repository，还是数据库？
+- 如果是业务失败，到底是“订单不存在”，还是“重复支付”？
+- 如果是 500，具体异常是什么？
+
+也就是说：
+
+第8章解决的是“客户端看见什么错误”，但现在需要解决的是**“服务端怎么查这个错误”。**
+
+
+
+### 2. 如果不加日志，会有什么后果？
+
+对于服务端如何方便拍查错误，通常需要使用日志。
+
+如果没有日志，系统会进入一种“能跑，但不好维护”的状态：
+
+#### 1）只能看到结果，看不到过程
+
+客户端只能看到：
+
+- 404 / 409 / 500
+- title / detail / traceId
+
+但是看不到：
+
+- 请求有没有进 Service
+- 查询有没有成功
+- 更新有没有执行
+- 异常到底在什么位置抛出
+
+#### 2）线上问题几乎只能靠猜
+
+开发时可以打断点。但部署后，用户报错时不可能总是 attach 调试器。
+
+如果没有日志，通常只能问：
+
+- 几点报错的？
+- 哪个接口？
+- 能不能再复现一次？
+
+#### 3）第8章的 traceId 也发挥不了作用
+
+第8章里错误响应中的 `traceId`，本质上是给客户端的一把“钥匙”。
+
+但如果服务端日志里没有同一个标识，这把钥匙就开不了门。
+
+所以我们的目标非常明确：
+
+> **让服务端日志记录关键流程，并且能和第8章返回给客户端的 traceId 对上。**
+
+
+
+### 3. 什么是 ILogger？
+
+可以直接使用ASP.NET Core 内置的日志系统。
+
+#### 1）ILogger 通过 DI 注入
+
+和前面的 Repository / Service 一样，日志对象也可以直接注入：
+
+```csharp
+ILogger<OrderService> logger
+```
+
+#### 2）最常用的三个日志级别
+
+- `LogInformation`：正常关键流程
+- `LogWarning`：可预期的业务失败
+- `LogError`：非预期异常
+
+#### 3）日志记录的是“过程”，不是“业务结果”
+
+业务结果仍然是：
+
+- 正常返回数据
+- 或者抛异常 → 第7/8章统一处理
+
+日志只是把过程记下来，方便排查。
+
+
+
+### 4. 手动把串联traceId 和日志
+
+为了更好理解整异常响应（给客户端的）和日志系统（给服务端的）的关联，手动串联时：
+
+- 异常响应还是使用自定义的全局中间件 `GlobalExceptionMiddleware`
+- 日志模块使用框架内置的
+
+#### 4.1 先明确做什么
+
+目标只有两个：
+
+1. **记录 Pay 的关键流程日志**
+2. **让日志里显式带上和客户端响应相同的 traceId**
+
+也就是说，客户端报错后并传递一个 `traceId`，在服务端日志里搜同一个 `traceId`，就能找到对应的请求过程。
+
+#### 4.2  traceId 从哪里来？
+
+每次请求都会有一个 `HttpContext`。
+
+而 `HttpContext` 上有一个很重要的属性：
+
+```csharp
+context.TraceIdentifier
+```
+
+它表示“这次请求的标识”。
+
+所以获取traceId最直观的做法就是：
+
+- 返回给客户端的错误响应里放这个值
+- 日志里也显式记录这个值
+
+这样客户端和服务端就能通过同一个 id 连接起来。
+
+#### 4.3 如何让 Service 层也拿到 traceId？
+
+给客户端的错误响应是在中间件层，而记录日志的逻辑是在业务层（service层）。
+
+我们前面讲过：
+
+- `HttpContext` 是“每次请求一个”的上下文对象
+- 中间件里能直接拿到它
+- Controller 里也能间接访问它
+
+但 Service 默认拿不到 `HttpContext`。
+
+如果想在 Service 里也拿到`HttpContext`，并且读取当前请求的 `traceId`，就要通过框架提供的：
+
+```csharp
+IHttpContextAccessor
+```
+
+它的作用很简单：
+
+> **在非 Controller / 非 Middleware 的地方，访问当前请求的 HttpContext。**
+
+#### 4.4 异常中间件添加traceId
+
+给异常响应自定义的全局中间件 `GlobalExceptionMiddleware` 添加traceId字段
+
+```c#
+public sealed class GlobalExceptionMiddleware(RequestDelegate next)
+{
+   ...
+
+    private static async Task WriteProblemAsync(
+        HttpContext context,
+        int statusCode,
+        string title,
+        string detail
+        )
+    {
+        ...
+        // 添加traceId字段
+        problem.Extensions.Add("traceId", context.TraceIdentifier);
+
+        await context.Response.WriteAsJsonAsync(problem);
+    }
+}
+```
+
+#### 4.4 注册 IHttpContextAccessor
+
+**Program.cs**
+
+```csharp
+builder.Services.AddHttpContextAccessor();
+```
+
+这一步只做一件事：
+
+让后面 Service 能通过 DI 拿到 `IHttpContextAccessor`。
+
+#### 4.5 在 OrderService 中注入 ILogger 和 IHttpContextAccessor
+
+**Services/OrderService.cs**
+
+```csharp
+using Microsoft.Extensions.Logging;
+using WebAPI_Basics.Domain;
+using WebAPI_Basics.Repositories;
+
+namespace WebAPI_Basics.Services;
+
+public class OrderService(
+    IOrderRepository repo,
+    ILogger<OrderService> logger,
+    IHttpContextAccessor httpContextAccessor)
+{
+    public async Task<List<Order>> GetAllAsync(OrderQueryRequest query, CancellationToken cancellationToken) =>
+        await repo.GetAllAsync(query, cancellationToken);
+
+    public async Task<Order> GetByIdAsync(int id, CancellationToken cancellationToken) =>
+        await repo.GetByIdAsync(id, cancellationToken) ?? throw new OrderNotFoundException(id);
+
+    public async Task<Order> CreateAsync(OrderCreateRequest request, CancellationToken cancellationToken) =>
+        await repo.AddAsync(request.Amount, cancellationToken);
+
+    public async Task<Order> PayAsync(int id, CancellationToken cancellationToken)
+    {
+        var traceId = httpContextAccessor.HttpContext?.TraceIdentifier;
+
+        logger.LogInformation("Pay started. OrderId={OrderId}, TraceId={TraceId}", id, traceId);
+
+        var order = await repo.GetByIdAsync(id, cancellationToken);
+        if (order is null)
+        {
+            logger.LogWarning("Pay failed: order not found. OrderId={OrderId}, TraceId={TraceId}", id, traceId);
+            throw new OrderNotFoundException(id);
+        }
+
+        if (order.Status == "Paid")
+        {
+            logger.LogWarning("Pay failed: order already paid. OrderId={OrderId}, TraceId={TraceId}", id, traceId);
+            throw new OrderConflictException($"Order {id} was already paid");
+        }
+
+        await repo.UpdateStatusAsync(id, "Paid", cancellationToken);
+
+        logger.LogInformation("Pay succeeded. OrderId={OrderId}, TraceId={TraceId}", id, traceId);
+
+        return order;
+    }
+}
+```
+
+#### 4.6 原理是什么？
+
+整条链路：
+
+1. 客户端发请求
+2. Kestrel 创建 `HttpContext`
+3. 这次请求有自己的 `TraceIdentifier`
+4. Service 通过 `IHttpContextAccessor` 取到当前请求的 `TraceIdentifier`
+5. 日志里显式把这个 `TraceId` 打出来
+6. 第8章错误响应里也带这个 `traceId`
+7. 客户端给后端一个 `traceId`
+8. 后端在日志里搜同一个 `traceId`，就能找到这次请求的流程
+
+这就是“traceId 和日志真正连起来”的机制。
+
+#### 4.7 对未知异常（500）处理
+
+因为 `PayAsync` 里记录的是“业务过程日志”，但对未知异常（500）来说，最关键的信息通常还是异常对象本身。
+
+因此对于对未知异常（500）的日志记录，需要再中间件中添加：
+
+**Middlewares/GlobalExceptionMiddleware.cs**
+
+```csharp
+public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<GlobalExceptionMiddleware>  logger)
+{
+    public async Task InvokeAsync(HttpContext context)
+    {
+        try
+        {
+            await next(context);
+        }
+       ...
+        catch (Exception ex)
+        {
+            // 添加对未知异常的日志记录
+            logger.LogError(
+                ex,
+                "Unhandled exception. Path={Path}, TraceId={TraceId}",
+                context.Request.Path,
+                context.TraceIdentifier);
+
+            await WriteProblemAsync(context, StatusCodes.Status500InternalServerError,
+                "Internal Server Error", "Unexpected error.");
+        }
+    }
+
+   ...
+}
+```
+
+修改之后，日志功能基本完整了：
+
+- 业务流程日志：在 Service 里
+- 未知异常日志：在中间件里
+- 两边都能带 `TraceId`
+
+
+
+### 5. 优化 - 使用BeginScope
+
+上面那种写法虽然已经能用，但还有一个小问题：
+
+- 每一条日志都要手动写 `TraceId={TraceId}`、`OrderId={OrderId}`
+
+可以使用一个常见小工具：
+
+```csharp
+logger.BeginScope(...)
+```
+
+它的作用可以简单理解成：
+
+> **给一段日志统一加上一个上下文标签。**
+
+#### 5.1 为什么要用 BeginScope？
+
+假设 Pay 这个流程里有 4~5 条日志。
+
+如果每一条都手动写 `OrderId`，会很重复。
+
+而 `BeginScope` 可以把 `OrderId` 这一类“这段流程共享的信息”统一挂上去。
+
+#### 5.2 在 PayAsync 中使用 BeginScope
+
+```csharp
+public async Task<Order> PayAsync(int id, CancellationToken cancellationToken)
+{
+    var traceId = httpContextAccessor.HttpContext?.TraceIdentifier;
+
+    using var _ = logger.BeginScope(new Dictionary<string, object>
+    {
+        ["OrderId"] = id,
+        ["TraceId"] = traceId ?? string.Empty
+    });
+
+    logger.LogInformation("Pay started.");
+
+    var order = await repo.GetByIdAsync(id, cancellationToken);
+    if (order is null)
+    {
+        logger.LogWarning("Pay failed: order not found.");
+        throw new OrderNotFoundException(id);
+    }
+
+    if (order.Status == "Paid")
+    {
+        logger.LogWarning("Pay failed: order already paid.");
+        throw new OrderConflictException($"Order {id} was already paid");
+    }
+
+    await repo.UpdateStatusAsync(id, "Paid", cancellationToken);
+
+    logger.LogInformation("Pay succeeded.");
+
+    return order;
+}
+```
+
+注意：
+
+**默认情况下，控制台输出可能看不见 Scope 的效果。必须在 `appsettings.json` 中明确开启它：**
+
+```c#
+{
+  "Logging": {
+    "Console": {
+      "IncludeScopes": true
+    }
+  }
+}
+```
+
+这样这段作用域里的日志就都共享：
+
+- `OrderId`
+- `TraceId`
+
+可以把它理解成：
+
+> **不用每条日志都重复写公共字段，而是给这一段流程统一贴标签。**
+
+
+
+### 6. 优化 - 让日志自动带请求 Trace 信息
+
+上面自定义方式的优点是：
+
+**原理清楚、能明确看到 traceId 是怎么从 HttpContext 进入日志的。**
+
+但到了较新的 ASP.NET Core 项目里，更推荐的做法是：
+
+**让日志系统自己把请求 Trace 信息带进日志。**
+
+也就是说：
+
+- 不再手动从 `IHttpContextAccessor` 里拿 traceId
+- 而是让日志框架自动把 TraceId / SpanId 放进日志上下文
+
+#### 6.1 先明确：这一步解决什么问题？
+
+它解决的是：
+
+- 不想每个 Service 都手动读取 `HttpContext.TraceIdentifier`
+- 不想每一条日志都手动写 `TraceId={TraceId}`
+- 希望框架自动把请求级追踪信息带上
+
+为了能更好的利用框架自带的组件，我们对异常响应的处理也使用框架字段的组件 `AddProblemDetails`和`UseExceptionHandler`
+
+注册
+
+```c#
+builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<OrderExceptionHandler>();
+```
+
+使用
+
+```c#
+app.UseExceptionHandler();
+```
+
+#### 6.2 Program.cs 配置日志输出作用域和 Trace 信息
+
+```csharp
+public class Program
+{
+    public static void Main(string[] args)
+    {
+        var builder = WebApplication.CreateBuilder(args);
+        builder.Services.AddControllers();
+        
+        // 异常处理的组件
+        builder.Services.AddProblemDetails();
+        builder.Services.AddExceptionHandler<OrderExceptionHandler>();
+        
+        // 日志系统的配置
+        //配置日志输出作用域和 Trace 信息
+        builder.Logging.AddSimpleConsole(options =>
+        {
+            options.IncludeScopes = true;
+        });
+
+        builder.Logging.Configure(options =>
+        {
+            options.ActivityTrackingOptions =
+                ActivityTrackingOptions.TraceId |
+                ActivityTrackingOptions.SpanId |
+                ActivityTrackingOptions.ParentId;
+        });
+        
+
+        builder.Services.AddScoped<OrderService>();
+        builder.Services.AddScoped<IOrderRepository, EfOrderRepository>();
+        builder.Services.AddDbContext<AppDbContext>(options =>options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+        builder.Services.AddOpenApi(); 
+
+        var app = builder.Build();
+        if (app.Environment.IsDevelopment())
+        {
+            app.MapOpenApi(); 
+            app.MapScalarApiReference(options => 
+            {
+                options.WithTitle("WebAPI_Basics Documentation")
+                    .WithTheme(ScalarTheme.Moon); 
+            });
+        }
+        app.UseHttpsRedirection();
+        app.UseAuthorization();
+
+        app.UseExceptionHandler();
+        
+        app.MapControllers();
+        app.Run();
+    }
+}
+```
+
+#### 6.3 原理是什么？
+
+不再自己去 `httpContextAccessor.HttpContext?.TraceIdentifier`。
+
+而是：
+
+- 框架维护请求的 Trace 上下文
+- 日志系统把这些 Trace 信息自动放进日志作用域
+- 只要开启 `IncludeScopes`
+- 日志输出里就能看到 TraceId / SpanId 等字段
+
+所以这一版更像是：
+
+> **把“请求级标识”交给框架自动处理。**
+
+#### 6.4 这时 Service 层代码可以更干净
+
+```csharp
+using Microsoft.Extensions.Logging;
+using WebAPI_Basics.Domain;
+using WebAPI_Basics.Repositories;
+
+namespace WebAPI_Basics.Services;
+
+public class OrderService(
+    IOrderRepository repo,
+    ILogger<OrderService> logger)
+{
+    public async Task<Order> PayAsync(int id, CancellationToken cancellationToken)
+    {
+        using var _ = logger.BeginScope(new Dictionary<string, object>
+        {
+            ["OrderId"] = id
+        });
+
+        logger.LogInformation("Pay started.");
+
+        var order = await repo.GetByIdAsync(id, cancellationToken);
+        if (order is null)
+        {
+            logger.LogWarning("Pay failed: order not found.");
+            throw new OrderNotFoundException(id);
+        }
+
+        if (order.Status == "Paid")
+        {
+            logger.LogWarning("Pay failed: order already paid.");
+            throw new OrderConflictException($"Order {id} was already paid");
+        }
+
+        await repo.UpdateStatusAsync(id, "Paid", cancellationToken);
+
+        logger.LogInformation("Pay succeeded.");
+
+        return order;
+    }
+}
+```
+
+这时：
+
+- `OrderId` 仍然由你自己补（业务级上下文）
+- `TraceId` 交给框架自动补（请求级上下文）
+
+这就是更推荐的职责分工。
+
+
+
+### 7. 两种方式怎么理解？
+
+#### 方式一：自定义方式
+
+- 手动从 `HttpContext.TraceIdentifier` 读取 traceId
+
+- traceId的格式是：`0HNJQCR0TPI83:00000005` (HttpContext.TraceIdentifier)，
+
+    是 ASP.NET Core **内部服务器（Kestrel）** 生成的一个简单字符串 ID。
+
+    它主要用于在本地日志中跟踪 Web 服务器内部的请求处理过程。
+
+    格式比较随意，通常是连接 ID + 自增序号。
+
+- 手动把 traceId 写进日志
+
+- 优点：原理最直观，最容易理解
+
+#### 方式二：框架推荐方式
+
+- 框架自动把 Trace 信息放进日志上下文
+
+- Trace 信息可以包含 更多，比如 `SpanId`, `ParentId`
+
+- traceId的格式是：`00-d771fc...-00` (Activity.Current.Id)
+
+    是 **分布式追踪（W3C Trace Context）** 标准的 ID。
+
+    **`.NET 7/8+` 的 `AddProblemDetails` 默认优先使用这个。**
+
+    结构是：`版本号-追踪ID-父跨度ID-标志`。
+
+    设计目的是为了在**微服务**之间跳转时，所有的服务都能共享同一个全局追踪 ID。
+
+- 只负责业务级信息（例如 `OrderId`）
+
+- 优点：代码更干净、更标准
+
+
+
+### 8. 如何验证？
+
+#### 验证1：Pay 成功
+
+- 创建订单
+- 调用 `POST /orders/{id}/pay`
+
+预期控制台看到：
+
+- `Pay started`
+- `Pay succeeded`
+
+并且日志里有：
+
+- `OrderId`
+- `TraceId`（自定义方式是手动写出来，推荐方式是 scope 自动带出来）
+
+#### 验证2：订单不存在
+
+- 调 `POST /orders/999999/pay`
+
+预期：
+
+- 日志里看到 `Pay failed: order not found`
+- 日志里有 `TraceId`
+- 客户端收到 404 ProblemDetails
+
+这时客户端把 `traceId` 发给服务端，服务端可以去日志里搜这个值。
+
+#### 验证3：重复支付
+
+- 同一订单支付两次
+
+预期：
+
+- 第二次日志里看到 `Pay failed: order already paid`
+- 客户端收到 409 ProblemDetails
+
+#### 验证4：未知异常
+
+例如暂时在 Repository 里故意抛一个 `new Exception("boom")`
+
+预期：
+
+- 中间件 `LogError(...)` 记录异常
+- 日志里有 `TraceId`
+- 客户端收到 500 ProblemDetails
+
+
+
+### 9. 本章小结
+
+本章真正解决的是：
+
+> **让服务端“可排查”。**
+
+两层能力：
+
+#### 1）基础日志能力
+
+- 在 Service 关键流程打 `Information / Warning`
+- 在未知异常处打 `Error`
+
+#### 2）traceId 真正打通
+
+- 客户端错误响应里拿到 `traceId`
+- 服务端日志里记录同一个 `traceId`
+- 这样客户端报错时，后端才能按 `traceId` 查日志
+
+#### 有什么新的问题？
+
+现在日志已经能打出来了，但很快会发现：
+
+- 日志级别是不是要按环境切换？
+- 默认分页大小、最大页大小是不是还写死在代码里？
+- 数据库连接字符串是不是也写死了？
+- JWT 密钥后面肯定也不能写死
+
+所以要解决的是：
+
+> **配置管理：appsettings + Options**
+
+也就是：把那些“会变化的参数”从代码里抽出去，放到配置里统一管理。

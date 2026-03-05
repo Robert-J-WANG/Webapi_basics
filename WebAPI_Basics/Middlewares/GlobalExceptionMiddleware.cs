@@ -4,7 +4,7 @@ using WebAPI_Basics.Domain;
 
 namespace WebAPI_Basics.Middlewares;
 
-public sealed class GlobalExceptionMiddleware(RequestDelegate next)
+public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<GlobalExceptionMiddleware>  logger)
 {
     public async Task InvokeAsync(HttpContext context)
     {
@@ -20,8 +20,15 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next)
         {
             await WriteProblemAsync(context, StatusCodes.Status409Conflict, "Conflict", ex.Message);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            // 添加对未知异常的日志记录
+            logger.LogError(
+                ex,
+                "Unhandled exception. Path={Path}, TraceId={TraceId}",
+                context.Request.Path,
+                context.TraceIdentifier);
+
             await WriteProblemAsync(context, StatusCodes.Status500InternalServerError,
                 "Internal Server Error", "Unexpected error.");
         }
@@ -31,7 +38,8 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next)
         HttpContext context,
         int statusCode,
         string title,
-        string detail)
+        string detail
+        )
     {
         if (context.Response.HasStarted) return;
 
@@ -44,8 +52,10 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next)
             Status = statusCode,
             Title = title,
             Detail = detail,
-            Instance = context.Request.Path
+            Instance = context.Request.Path,
         };
+        // 添加traceId字段
+        problem.Extensions.Add("traceId", context.TraceIdentifier);
 
         await context.Response.WriteAsJsonAsync(problem);
     }
