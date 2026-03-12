@@ -3650,3 +3650,339 @@ Authorization: Bearer <eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwOi8vc2NoZW1h
 
 因此，需要用测试锁住高价值场景（Pay 成功 / 重复支付 / 不存在订单）。
 
+
+
+## 12. 单元测试
+
+### 1. 解决什么问题？
+
+到目前为止，项目已经具备很多关键能力：数据库、异常收口、ProblemDetails、日志、配置、JWT。
+
+但这会带来一个现实问题：
+
+- 以后每改一次 Service/Repository 的代码，都可能不小心把关键行为改坏（回归 bug）
+
+比如，用 Pay 用例举例：
+
+现在的 `PayAsync` 有三条核心规则：
+
+- 订单不存在 → NotFound
+- 已支付 → Conflict
+- 正常支付 → 更新为 Paid
+
+如果以后重构、优化、换数据库实现、加日志、加配置……任何一次改动都可能不小心破坏其中一条。
+
+没有测试时，只能靠：
+
+- 手动用 Scalar 点一遍（慢、容易漏）
+- 或者只有上线/人工点到才发现
+
+所以本章要解决的是：
+
+- **用自动化测试保证关键业务逻辑不回归**
+- **改完代码，很快就能知道有没有破坏行为**
+
+也就是说：把“业务规则”写成可重复执行的检查，并能提前发现回归。
+
+因此，我们需要进行单元测试。
+
+
+
+### 2. 单元测试是什么？
+
+#### 2.1 Unit Test
+
+单元测试测的是对**一个小单元的逻辑**执行的测试就是单元测试（Unit Test）。
+
+在项目里最合适的小单元就是：
+
+> `OrderService`（业务规则中心）
+
+单元测试的典型特点：
+
+- 不启动 Web 服务器（不走 HTTP）
+- 不连真实数据库（不依赖外部环境）
+- 很快（毫秒级）
+
+#### 2.2 为什么测 Service，而不是 Controller？
+
+在前面章节的设计：
+
+- Controller 很薄（HTTP 外壳）
+- Service 承载业务规则（NotFound/Conflict/Pay 成功）
+- Service 依赖 `IOrderRepository` 接口（可替换）
+
+这种设计，Service 依赖接口，不依赖具体实现。
+
+所以测试时可以把真实 EF Repo 换成 Fake Repo。而controller无法进行这种单元测试。
+
+
+
+### 3. 使用xUnit 
+
+xUnit 是 .NET 最常用的测试框架之一，用来写和运行测试用例的。
+
+它做的事情很简单：
+
+- 识别哪些方法是测试
+
+    例如写 `[Fact]`，xUnit 就知道这是一个测试用例。
+
+- 运行测试并报告结果
+
+    执行 `dotnet test` 时，测试运行器会调用 xUnit 去执行这些测试，输出通过/失败。
+
+- 提供 `Assert` 工具做断言
+
+不需要自己搭建运行器。用 `dotnet new xunit` 创建测试项目后，会自动安装需要的包，并且执行`dotnet test` 就能跑。
+
+
+
+### 4. 如何实现？
+
+#### 4.1 单独新建一个测试项目
+
+需要再同一个solution下创建新的测试项目，并且**引用生产项目**。
+
+因为测试项目和生产项目职责不同：
+
+- 生产项目：发布运行
+- 测试项目：只跑测试
+
+因此需要分开，这样能保证：
+
+- 测试依赖（xUnit）不污染生产依赖
+- 结构清晰
+- `dotnet test` 能标准化运行
+
+在 solution 根目录执行：
+
+```bash
+// 创建新的测试项目
+dotnet new xunit -n WebAPI_Basics.Tests
+// 引用生产项目
+dotnet add WebAPI_Basics.Tests reference WebAPI_Basics
+```
+
+关键点：
+
+**测试项目能使用 生成项目的API ，靠的是 project reference。**
+
+注意：如果solution里没有测试项目，需要手动添加
+
+```bash
+ dotnet sln add WebAPI_Basics.Tests/WebAPI_Basics.Tests.csproj 
+```
+
+#### 4.2. 准备Fake Repository
+
+要测试的是 `OrderService.PayAsync` 的业务规则，但 `OrderService` 依赖 `IOrderRepository`。
+
+如果测试直接用 EF Repo：
+
+- 就必须连数据库、准备数据、处理环境问题
+- 测试会慢、也不稳定
+
+所以使用 Fake Repo（测试替身）：
+
+- Fake Repo 是 `IOrderRepository` 的一个“内存实现”
+- 用来模拟数据访问，让测试可控、可观察、且不依赖外部资源。
+
+希望它能提供两种能力：
+
+1. **可控输入**：想要“订单存在/不存在/已支付”都能 Seed
+2. **可观察行为**：能记录 Service 是否调用了 Update（比如计数）
+
+新建文件：`WebAPI_Basics.Tests/Fakes/FakeOrderRepository.cs`
+
+```csharp
+
+using WebAPI_Basics.Domain;
+using WebAPI_Basics.Dtos.Requests;
+using WebAPI_Basics.Repositories;
+
+namespace WebAPI_Basics.Tests.Fakes;
+
+public class FakeOrderRepository:IOrderRepository
+{
+    // 用 Dictionary 模拟“数据库表”：key=id，value=Order
+    private readonly Dictionary<int, Order> _store = new();
+	
+
+    // 记录 UpdateStatusAsync 被调用次数，用于断言 Service 有没有真的“更新”
+    public int UpdateStatusCallCount { get; private set; }
+
+    // Seed = 测试准备数据：提前放一条订单到“内存表”里
+    public void Seed(Order order) => _store[order.Id] = order;
+
+    public Task<List<Order>> GetAllAsync(OrderQueryRequest query, CancellationToken ct)
+        => Task.FromResult(_store.Values.ToList());
+
+    public Task<Order?> GetByIdAsync(int id, CancellationToken ct)
+        => Task.FromResult(_store.TryGetValue(id, out var o) ? o : null);
+
+    public Task<Order> AddAsync(decimal amount, CancellationToken ct)
+    {
+        var id = _store.Count == 0 ? 1 : _store.Keys.Max() + 1;
+        var order = new Order()
+        {
+            Id = id,
+            Amount = amount,
+            Status = "Created",
+        };
+
+        _store[id] = order;
+        return Task.FromResult(order);
+    }
+
+    public Task UpdateStatusAsync(int id, string status, CancellationToken ct)
+    {
+        UpdateStatusCallCount++;
+
+        if (_store.TryGetValue(id, out var o))
+        {
+            o.Status = status;
+        }
+
+        return Task.CompletedTask;
+    }
+}
+```
+
+#### 4.3. 编写OrderService 的 3 个单元测试
+
+新建文件：`WebAPI_Basics.Tests/OrderServiceTests.cs`
+
+> 说明：Service 构造函数可能注入了 `ILogger` 或`IHttpContextAccessor`。
+>
+> 测试里我们用最简单的替身：
+>
+> - `NullLogger`：空日志，不输出
+> - `DefaultHttpContext`：最小 HttpContext，避免访问 traceId 时为空
+
+```csharp
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging.Abstractions;
+using WebAPI_Basics.Domain;
+using WebAPI_Basics.Services;
+using WebAPI_Basics.Tests.Fakes;
+
+namespace WebAPI_Basics.Tests;
+
+public class OrderServiceTests
+{
+    [Fact]
+    public async Task PayAsync_WhenCreatedOrder_ShouldUpdateToPaid()
+    {
+        // Arrange：准备一个 Created 订单
+        var repo = new FakeOrderRepository();
+        repo.Seed(new Order
+        {
+            Id = 1,
+            Amount = 10,
+            Status = "Created",
+        });
+
+        var logger = NullLogger<OrderService>.Instance;
+        var accessor = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
+
+        var service = new OrderService(repo, logger);
+
+        // Act：执行 Pay
+        var order = await service.PayAsync(1, CancellationToken.None);
+
+        // Assert：业务期望——状态变 Paid；更新被调用一次
+        Assert.Equal("Paid", order.Status);
+        Assert.Equal(1, repo.UpdateStatusCallCount);
+    }
+    
+    [Fact]
+    public async Task PayAsync_WhenOrderNotFound_ShouldThrowNotFound()
+    {
+        // Arrange：不 seed 数据 => 查不到订单
+        var repo = new FakeOrderRepository();
+
+        var logger = NullLogger<OrderService>.Instance;
+        // var accessor = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
+
+        var service = new OrderService(repo, logger);
+
+        // Act + Assert：必须抛 NotFound 异常
+        await Assert.ThrowsAsync<OrderNotFoundException>(
+            () => service.PayAsync(999, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PayAsync_WhenAlreadyPaid_ShouldThrowConflict()
+    {
+        // Arrange：seed 一条 Paid 订单
+        var repo = new FakeOrderRepository();
+        repo.Seed(new Order
+        {
+            Id = 2,
+            Amount = 10,
+            Status = "Paid"
+        });
+        
+
+        var logger = NullLogger<OrderService>.Instance;
+        // var accessor = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
+
+        var service = new OrderService(repo, logger);
+
+        // Act + Assert：必须抛 Conflict 异常
+        await Assert.ThrowsAsync<OrderConflictException>(
+            () => service.PayAsync(2, CancellationToken.None));
+
+        // Assert：冲突时不应更新
+        Assert.Equal(0, repo.UpdateStatusCallCount);
+    }
+}
+```
+
+一些解释
+
+- `[Fact]`：告诉 xUnit “这是一个测试方法”
+- `Assert.Equal(a, b)`：断言相等，不相等就测试失败
+- `Assert.ThrowsAsync<T>(func)`：断言 func 执行时必须抛出 T 类型异常
+- `NullLogger<T>.Instance`：空 logger（避免 Service 构造函数需要 logger 但测试不关心日志）
+- `DefaultHttpContext`：框架提供的最小 HttpContext 实现
+- `CancellationToken.None`：测试里不需要取消功能，所以用 None
+
+
+
+### 5. 运行测试
+
+在 solution 根目录运行：
+
+```bash
+dotnet test
+```
+
+应该看到 3 个测试通过。
+
+```bash
+Restore complete (1.0s)
+  WebAPI_Basics succeeded (0.6s) → WebAPI_Basics/bin/Debug/net9.0/WebAPI_Basics.dll
+  WebAPI_Basics.Tests succeeded (0.4s) → WebAPI_Basics.Tests/bin/Debug/net9.0/WebAPI_Basics.Tests.dll
+[xUnit.net 00:00:00.00] xUnit.net VSTest Adapter v2.8.2+699d445a1a (64-bit .NET 9.0.13)
+[xUnit.net 00:00:00.10]   Discovering: WebAPI_Basics.Tests
+[xUnit.net 00:00:00.14]   Discovered:  WebAPI_Basics.Tests
+[xUnit.net 00:00:00.14]   Starting:    WebAPI_Basics.Tests
+[xUnit.net 00:00:00.23]   Finished:    WebAPI_Basics.Tests
+  WebAPI_Basics.Tests test succeeded (2.2s)
+
+Test summary: total: 3, failed: 0, succeeded: 3, skipped: 0, duration: 2.2s
+Build succeeded in 4.5s
+```
+
+
+
+### 6. 本章小结
+
+本章学会了：
+
+1. **单元测试的目标**：锁住业务规则，防止回归
+2. **为什么测 Service**：它承载业务逻辑，且可用接口替换依赖
+3. **Fake Repo 的作用**：隔离 DB，让测试快、稳定、可控
+4. **xUnit 的最小用法**：`[Fact]` + `Assert` + `ThrowsAsync`
