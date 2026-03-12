@@ -3142,3 +3142,511 @@ api现在具体最基础的配置能力，但是遇到更多配置时，如何�
 
 **如何做一个最小可用的 JWT 认证（登录签 Token + 保护接口），并把 JWT 参数配置化？**
 
+
+
+## 11. JWT 认证
+
+### 1. 解决什么问题？
+
+现在任何人只要知道 API 地址，就能调用：
+
+- 创建订单
+- 支付订单
+- 查询订单
+
+在真实项目里，这样是不可接受的，至少要做到：
+
+> **写操作必须登录（才能 pay / create），否则直接拒绝。**
+
+所以本章要解决的就是：
+
+1. **认证（Authentication）**：你是谁？有没有登录？
+2. **授权（Authorization）**：你有没有权限做这件事？
+
+JWT 是 API 项目里最常见的入门方案。
+
+
+
+### 2. 什么是JWT？
+
+#### Token 是什么？
+
+Token 是服务器发给客户端的一串字符串。客户端以后每次请求都带上它：
+
+```
+Authorization: Bearer <token>
+```
+
+当用户登录成功后，服务器会签发给用户一张“通行证”，之后用户访问其他受保护的接口时，只需出示这张证件，服务器无需再次查询数
+
+据库即可验证用户的身份。
+
+JWT (JSON Web Token) 一种**有特定格式、自带数据**的 Token。
+
+#### JWT 的三段结构
+
+JWT 长这样：
+
+```
+header.payload.signature
+```
+
+- header： 描述令牌的元数据（如使用的加密算法，通常是 HMAC SHA256）。
+
+- payload：放 claims（如用户 ID、角色、过期时间等），存放实际数据的地方。
+
+- signature：签名（防伪）。由 Header、Payload 和服务器的一个**秘密密钥（Secret Key）**共同加密生成。**如果有人修改了 Payload，签名就会失效。**
+
+关键点：**JWT 默认不是加密的，是签名的。**
+
+也就是说 payload 理论上可以被别人 base64 解开看内容，所以不要把密码等敏感信息放进 claims。
+
+#### Claims 是什么？
+
+JWT 的 Payload（载荷）部分是一个 JSON 对象。JWT 标准（RFC 7519）定义了一套**注册声明（Registered Claims）**。
+
+| **键**    | **名称**   | **说明**                                                     |
+| --------- | ---------- | ------------------------------------------------------------ |
+| **`iss`** | Issuer     | **签发者**。表明这个 Token 是由哪个服务生成的（如 `auth.myapp.com`）。 |
+| **`sub`** | Subject    | **主题/主体**。通常存放唯一用户标识（如 `user_id`）。        |
+| **`aud`** | Audience   | **接收者**。表明这个 Token 是给哪个服务使用的（如 `api.myapp.com`）。 |
+| **`exp`** | Expiration | **过期时间**。必须是 Unix 时间戳（秒），过期后 Token 无效。  |
+| **`nbf`** | Not Before | **生效时间**。在此时间之前，Token 也是无效的。               |
+| **`iat`** | Issued At  | **签发时间**。记录 Token 是什么时候创建的。                  |
+| **`jti`** | JWT ID     | **唯一标识**。用于防止重放攻击（像一次性入场券的编号）。     |
+
+token 里携带的一些“身份标签”，例如：
+
+- username
+- userId
+- role
+
+会被放到 `HttpContext.User` 里, 后面授权会用。
+
+#### Secret Key是什么？
+
+服务器用它生成签名，验证时也用它。
+
+**密钥泄露 = 任何人都能伪造 token**，所以必须配置化。
+
+
+
+### 3. 实现路线
+
+在现有“Order API（数据库 + 全局异常 + ProblemDetails + 日志 + 配置）”基础上，**最小改动**加上 JWT：
+
+- 先能“登录拿 token”，再能“带 token 访问受保护接口”。
+- 不做注册、不做用户表、不做刷新令牌。
+
+1. **配置 JwtOptions**
+2. **注册 JWT Bearer 认证**（让服务器能“验证 token”）
+3. **写一个最小 login 接口**（签发 token）
+4. **给一个接口加 [Authorize]**（验证保护生效）
+5. **用 Scalar 带 token 调用受保护接口**
+
+
+
+### 4. 配置 JWT bearer authentication
+
+#### 4.1 配置 JwtOptions
+
+1. appsettings.json 增加 Jwt 节
+
+    ```c#
+    {
+      "Jwt": {
+        "Issuer": "WebApiBasics",
+        "Audience": "WebApiBasicsClient",
+        "Key": "PLEASE_CHANGE_TO_A_LONG_RANDOM_SECRET_KEY_32+_CHARS",
+        "ExpireMinutes": 60
+      }
+    }
+    ```
+
+    **这四个字段什么意思？**
+
+    - Issuer：签发者（谁发的 token）
+    - Audience：接收者（token 给谁用）
+    - Key：签名密钥（最重要，不能短）
+    - ExpireMinutes：有效期
+
+    为什么要有 Issuer/Audience？
+
+    因为 token 不是只看签名，也要验证“是不是我这个系统发的，给我这个系统用的”。
+
+2. 创建Options 类：JwtOptions
+
+    Options/JwtOptions.cs
+
+    ```c#
+    public sealed class JwtOptions
+    {
+        public string Issuer { get; init; } = "";
+        public string Audience { get; init; } = "";
+        public string Key { get; init; } = "";
+        public int ExpireMinutes { get; init; } = 60;
+    }
+    ```
+
+3. Program.cs 绑定配置
+
+    ```c#
+    builder.Services.Configure<JwtOptions>(
+        builder.Configuration.GetSection("Jwt"));
+    ```
+
+    到这里，配置已经“收口”成一个强类型对象了。
+
+#### 4.2 注册 JWT Bearer
+
+这一部分解决的问题是：
+
+> 客户端以后带 `Authorization: Bearer xxx` 来了，服务器怎么解析、怎么验证？
+
+1. 添加 NuGet
+
+    一般 Web API 模板会有，但如果缺少，需要：
+
+    ```c#
+    Microsoft.AspNetCore.Authentication.JwtBearer
+    ```
+
+2. Program.cs 添加认证与授权注册，并配置认证规则
+
+    ```c#
+    
+    builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+        .AddJwtBearer((options) =>
+        {
+            // 从配置系统里取出jwt，再“反序列化”一个 JwtOptions 对象（不是通过 DI）
+            // 因为配置阶段无法拿到通过DI拿到的对象，DI是在app.run()之后才执行
+            var jwt = builder.Configuration.GetSection("Jwt").Get<JwtOptions>()
+                      ?? throw new Exception("Jwt config section missing");
+            if(string.IsNullOrEmpty(jwt.Key))
+                throw new Exception("Jwt key config section missing");
+    
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                // 1) 验 issuer
+                ValidateIssuer = true,
+                ValidIssuer = jwt.Issuer,
+    
+                // 2) 验 audience
+                ValidateAudience = true,
+                ValidAudience = jwt.Audience,
+    
+                // 3) 验签名
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.Key)),
+    
+                // 4) 验过期
+                ValidateLifetime = true,
+    
+                // 允许一点点服务器时间偏差
+                ClockSkew = TimeSpan.FromSeconds(30)
+            };
+        });
+    
+    builder.Services.AddAuthorization();
+    ```
+
+    **这段代码在做什么？**
+
+    - `AddAuthentication(...)`：告诉框架“我们用 JWT Bearer 作为认证方式”
+    - `AddJwtBearer(...)`：配置怎么验证 token（issuer/audience/key/expire）
+    - `AddAuthorization()`：允许使用 `[Authorize]` 等授权机制
+
+3. 启用中间件（非常重要的顺序）
+
+    ```c#
+    app.UseAuthentication();
+    app.UseAuthorization();
+    ```
+
+    必须放在 `MapControllers()` 前面。
+
+    **为什么要两句？**
+
+    - `UseAuthentication()`：把 token 解析成 `HttpContext.User`
+    - `UseAuthorization()`：检查 `[Authorize]`，决定让不让进 Action
+
+4. 升级配置认证规则 - 使用扩展方法
+
+    Program.cs 里 JWT 配置规则太多， 通常会把“基础设施配置”收口到单独层里，让 Program.cs 干净。
+
+    最常见的方式是**使用扩展方法收口**
+
+    新建扩展方法类，并编写扩展方法 AddJwtAuth
+
+    `Extensions/ServiceCollectionExtensions.cs`
+
+    ```c#
+    public static class ServiceCollectionExtensions
+    {
+        public static IServiceCollection AddJwtAuth(this IServiceCollection services, IConfiguration configuration)
+        {
+            var jwt = configuration.GetSection("Jwt").Get<JwtOptions>()
+                ?? throw new Exception("Jwt config section missing");;
+            
+            services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(options =>
+            {
+                if (string.IsNullOrEmpty(jwt.Key))
+                    throw new Exception("Jwt key config section missing");
+    
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    // 1) 验 issuer
+                    ValidateIssuer = true,
+                    ValidIssuer = jwt.Issuer,
+    
+                    // 2) 验 audience
+                    ValidateAudience = true,
+                    ValidAudience = jwt.Audience,
+    
+                    // 3) 验签名
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.Key)),
+    
+                    // 4) 验过期
+                    ValidateLifetime = true,
+    
+                    // 允许一点点服务器时间偏差
+                    ClockSkew = TimeSpan.FromSeconds(30)
+                };
+            });
+            
+            return services;
+        }
+    }
+    ```
+
+    主程序中使用扩展方法
+
+    ```c#
+    public class Program
+    {
+        public static void Main(string[] args)
+        {
+            var builder = WebApplication.CreateBuilder(args);
+            builder.Services.AddControllers();
+    
+            // 异常处理的组件
+            builder.Services.AddProblemDetails();
+            builder.Services.AddExceptionHandler<OrderExceptionHandler>();
+            
+            //配置日志输出 Trace 信息
+            builder.Logging.Configure(options =>
+            {
+                options.ActivityTrackingOptions =
+                    ActivityTrackingOptions.TraceId |
+                    ActivityTrackingOptions.SpanId |
+                    ActivityTrackingOptions.ParentId;
+            });
+    
+            // 注册配置对象OrderApiOptions，并绑定配置参数OrderApi
+            builder.Services.Configure<OrderApiOptions>(builder.Configuration.GetSection("OrderApi"));
+            // 注册配置对象JwtOptions，并绑定配置参数Jwt
+            builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
+            
+            
+           // 使用扩展方法，实现注册Jwt认证。
+            builder.Services.AddJwtAuth(builder.Configuration);
+       		// 注册授权服务
+            builder.Services.AddAuthorization();
+    
+            builder.Services.AddScoped<OrderService>();
+            builder.Services.AddScoped<IOrderRepository, EfOrderRepository>();
+            builder.Services.AddDbContext<AppDbContext>(options =>
+                options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+            builder.Services.AddOpenApi();
+    
+            var app = builder.Build();
+                
+            if (app.Environment.IsDevelopment())
+            {
+                app.MapOpenApi();
+                app.MapScalarApiReference(options =>
+                {
+                    options.WithTitle("WebAPI_Basics Documentation")
+                        .WithTheme(ScalarTheme.Moon);
+                });
+            }
+            app.UseHttpsRedirection();
+            
+            // 认证，鉴别身份
+            app.UseAuthentication();
+            // 启用授权中间件（Authorization）
+            app.UseAuthorization();
+            
+            app.UseExceptionHandler();
+            app.MapControllers();
+    
+            app.Run();
+        }
+    }
+    ```
+
+    
+
+### 5. 登录接口
+
+现在服务器“会验证 token”了，但客户端还没有 token。
+
+所以我们需要一个 `/auth/login`，返回 token。
+
+> 注意：这只是演示。真实项目会查数据库用户、密码哈希、刷新令牌等。
+>
+> 本章只做“最小闭环”。
+
+#### 5.1 创建LoginRequest DTO
+
+**Dtos/Requests/LoginRequest.cs**
+
+```csharp
+public sealed class LoginRequest
+{
+    public string Username { get; init; } = "";
+    public string Password { get; init; } = "";
+}
+```
+
+#### 5.2 创建AuthController 
+
+用来签发 token
+
+**Controllers/AuthController.cs**
+
+```csharp
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
+using WebAPI_Basics.Options;
+
+[ApiController]
+[Route("auth")]
+public sealed class AuthController(IOptions<JwtOptions> jwtOptions) : ControllerBase
+{
+    [HttpPost("login")]
+    public IActionResult Login(LoginRequest req)
+    {
+        // 最小演示：硬编码账号
+        if (req.Username != "admin" || req.Password != "123456")
+            return Unauthorized();
+
+        var jwt = jwtOptions.Value;
+
+        // 1) Claims（写进 token 的身份信息）
+        var claims = new List<Claim>
+        {
+            new(ClaimTypes.Name, req.Username),
+            new("role", "admin")
+        };
+
+        // 2) 生成签名凭据
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.Key));
+        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+        // 3) 生成 JWT
+        var token = new JwtSecurityToken(
+            issuer: jwt.Issuer,
+            audience: jwt.Audience,
+            claims: claims,
+            expires: DateTime.UtcNow.AddMinutes(jwt.ExpireMinutes),
+            signingCredentials: creds);
+
+        // 4) 序列化成字符串给客户端
+        var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
+
+        return Ok(new { access_token = tokenString, token_type = "Bearer" });
+    }
+}
+```
+
+**这一段要看懂的“机制”只有三步：**
+
+1. 准备 claims
+2. 用 key + algorithm 签名
+3. 生成 token 并返回字符串
+
+
+
+#### 5.3. 保护接口（[Authorize]）
+
+我们只先保护一个接口（例如 Pay）。
+
+**OrdersController.cs**
+
+```csharp
+using Microsoft.AspNetCore.Authorization;
+
+[Authorize]
+[HttpPost("{id:int}/pay")]
+public async Task<IActionResult> Pay(int id, CancellationToken ct)
+{
+    var order = await orderService.PayAsync(id, ct);
+    return Ok(order);
+}
+```
+
+**会发生什么？**
+
+- 没 token：直接 401（甚至进不了 Action）
+- token 合法：进入 Action
+- token 无效/过期：401
+
+
+
+### 6. 用 Scalar 验证
+
+#### 6.1 拿 token
+
+调用：
+
+- `POST /auth/login`
+    body：
+
+```json
+{ "username": "admin", "password": "123456" }
+```
+
+拿到 `access_token`
+
+#### 6.2 带 token 调用受保护接口
+
+在请求 header 加：
+
+```
+Authorization: Bearer <eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy93cy8yMDA1LzA1L2lkZW50aXR5L2NsYWltcy9uYW1lIjoiYWRtaW4iLCJyb2xlIjoiYWRtaW4iLCJleHAiOjE3NzMzMjA5MTYsImlzcyI6IldlYkFwaUJhc2ljcyIsImF1ZCI6IldlYkFwaUJhc2ljc0NsaWVudCJ9.69WS7A2ecl3Y-FUjhVkunSSSGd9DQea29YoKxTya5k0>
+```
+
+调用 `POST /orders/{id}/pay`
+
+#### 6.3 预期现象
+
+- 不带 token：401
+- 带正确 token：200
+- 带乱 token：401
+
+
+
+### 7. 本章小结
+
+本章完成了 JWT 的最小闭环：
+
+- 配置化 JwtOptions（复用第10章）
+- 注册 JwtBearer 验证（服务器能验 token）
+- login 签发 token（客户端能拿 token）
+- [Authorize] 保护接口（安全生效）
+- Scalar 带 Bearer token 调试
+
+**有什么新的问题？**
+
+现在加了认证授权，回归风险更大：
+
+一改代码就可能导致 login 失效、pay 被误开放、或错误返回不一致。
+
+因此，需要用测试锁住高价值场景（Pay 成功 / 重复支付 / 不存在订单）。
+

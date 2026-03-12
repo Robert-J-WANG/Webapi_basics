@@ -1,10 +1,16 @@
+using System.Runtime.CompilerServices;
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 using WebAPI_Basics.Data;
 using WebAPI_Basics.Middlewares;
 using WebAPI_Basics.Repositories;
 using WebAPI_Basics.Services;
 using Scalar.AspNetCore;
+using WebAPI_Basics.Extensions;
 using WebAPI_Basics.Options;
 
 namespace WebAPI_Basics;
@@ -14,6 +20,7 @@ public class Program
     public static void Main(string[] args)
     {
         // --- 1. 实例化 WebApplicationBuilder ---
+        
 
         // 初始化配置系统（Configuration）、日志工厂（Logging）及依赖注入容器（DI Container）。
         var builder = WebApplication.CreateBuilder(args);
@@ -36,16 +43,53 @@ public class Program
                 ActivityTrackingOptions.ParentId;
         });
 
-        // 能让service获取HttpContext
-        // builder.Services.AddHttpContextAccessor();
-
         // 注册配置对象OrderApiOptions，并绑定配置参数OrderApi
         builder.Services.Configure<OrderApiOptions>(builder.Configuration.GetSection("OrderApi"));
+        // 注册配置对象JwtOptions，并绑定配置参数Jwt
+        builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
+        
+        
+       // 使用扩展方法，实现注册Jwt认证。
+        builder.Services.AddJwtAuth(builder.Configuration);
+        var t = builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
+        /*
+        //添加认证与授权注册，并配置认证规则
+        builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+            .AddJwtBearer((options) =>
+            { 
+                // 从配置系统里取出jwt，再“反序列化”一个 JwtOptions 对象（不是通过 DI）
+                // 因为配置阶段无法拿到通过DI拿到的对象，DI是在app.run()之后才执行
+                var jwt = builder.Configuration.GetSection("Jwt").Get<JwtOptions>()
+                          ?? throw new Exception("Jwt config section missing");
+                if(string.IsNullOrEmpty(jwt.Key))
+                    throw new Exception("Jwt key config section missing");
+                
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    // 1) 验 issuer
+                    ValidateIssuer = true,
+                    ValidIssuer = jwt.Issuer,
+
+                    // 2) 验 audience
+                    ValidateAudience = true,
+                    ValidAudience = jwt.Audience,
+
+                    // 3) 验签名
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.Key)),
+
+                    // 4) 验过期
+                    ValidateLifetime = true,
+
+                    // 允许一点点服务器时间偏差
+                    ClockSkew = TimeSpan.FromSeconds(30)
+                };
+            });
+            */
+        builder.Services.AddAuthorization();
 
         // 注册我们自己的类型模型依赖
         builder.Services.AddScoped<OrderService>();
-        // builder.Services.AddScoped<IOrderRepository,InMemoryOrderRepository > ();
-        // builder.Services.AddScoped<IOrderRepository,SqlServerOrderRepository > ();
         builder.Services.AddScoped<IOrderRepository, EfOrderRepository>();
         // 注册数据库
         builder.Services.AddDbContext<AppDbContext>(options =>
@@ -58,6 +102,7 @@ public class Program
 
         // 锁定服务容器，准备配置请求处理管道。
         var app = builder.Build();
+        
 
         // --- 4. 请求管道配置阶段 (Middleware Pipeline) ---
 
@@ -77,9 +122,11 @@ public class Program
 
         // 启用 HSTS 和 HTTPS 重定向中间件，强制执行传输层安全协议。
         app.UseHttpsRedirection();
-
-        // 启用授权中间件（Authorization），拦截请求并校验声明（Claims）以进行访问控制。
+        // 认证，鉴别身份
+        app.UseAuthentication();
+        // 启用授权中间件（Authorization）
         app.UseAuthorization();
+    
 
 
         // 全局异常处理中间件：放在 MapControllers 之前，才能罩住 Controller/Service

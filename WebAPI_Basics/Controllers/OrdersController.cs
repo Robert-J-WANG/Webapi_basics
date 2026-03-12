@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using WebAPI_Basics.Domain;
@@ -10,10 +11,12 @@ namespace WebAPI_Basics.Controllers;
 [Route("[controller]")]
 public class OrdersController(OrderService service) : ControllerBase
 {
+    
     [HttpGet]
     public async Task<ActionResult<List<OrderResponse>>> GetAll([FromQuery] OrderQueryRequest query,
         CancellationToken cancellationToken)
     {
+        
         var result = (await service.GetAllAsync(query, cancellationToken)).Select(ToResponse).ToList();
         return Ok(result);
     }
@@ -21,6 +24,7 @@ public class OrdersController(OrderService service) : ControllerBase
     [HttpGet("{id:int}")]
     public async Task<ActionResult<OrderResponse>> GetById(int id, CancellationToken cancellationToken)
     {
+       
         var order = await service.GetByIdAsync(id, cancellationToken);
         return Ok(ToResponse(order));
     }
@@ -39,9 +43,11 @@ public class OrdersController(OrderService service) : ControllerBase
         );
     }
 
+    [Authorize]
     [HttpPost("{id:int}/pay")]
     public async Task<ActionResult<OrderResponse>> Pay(int id, CancellationToken cancellationToken)
     {
+        var httpObj = HttpContext;
         var order = await service.PayAsync(id, cancellationToken);
         return Ok(ToResponse(order));
     }
